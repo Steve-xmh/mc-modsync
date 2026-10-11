@@ -6,7 +6,7 @@
 
 ModSync：给 Minecraft **NeoForge 1.21.1** 服务器用的模组同步方案。
 
-- 服务端把 `mods/`（以及可选的客户端专用目录）发布成一份 JSON 清单，公开一个 HTTP 端口；
+- 服务端只需要装一个 NeoForge 模组：启动时向 FML 读取**实际加载的模组文件**，发布成一份 JSON 清单，公开一个 HTTP 端口（也可用独立进程形态扫目录）；
 - 客户端 agent 在**游戏启动前**校验/增量下载，然后把 `mods/` 目录重组出来；
 - 玩家自己装在 `mods-client/` 的模组永不被删改；同 mod id 冲突时服务器版本优先。
 
@@ -58,11 +58,11 @@ bash test/e2e-filter.sh              # 也可以单独跑任意一套
 6. **服务端的发布源是「FML 实际加载的模组」**（`publishLoadedMods`，`ModSyncMod.loadedModFiles()` 反射读 `ModList`），
    目录扫描（`modDirs`/`extraDirs`）只是补充与回退。不要把它改回"只扫目录"：那样会漏掉不在 `mods/` 的模组，
    也会把服务器没在运行的 jar 推给玩家。独立进程用 `--mod-file` 对应同一能力。
-11. **纯服务端模组不发布给客户端**，但判定不出侧向时**宁可多发**。判定依据：Fabric `fabric.mod.json.environment`、NeoForge `@Mod(dist = {...})`（必须真解析 class 注解，见 `ModEnv`）、Modrinth 项目元数据（兜底）。逃生门是 `forcePublish` / `--force-publish`。
-7. **`--once` 模式下 stdout 只能有清单**，所有诊断输出必须走 `diag()`（在 `--once` 时落到 stderr）。
-8. **服务端不得被拖垮。** 模组里的同步逻辑必须 `catch Throwable` 并只打日志；端口被占用、配置写坏都不能影响 Minecraft 服务器。
-9. **同步失败默认放行游戏启动**（只告警），`--strict` 才中止；版本不匹配的默认策略是"加载器提醒 / MC 版本跳过同步"。
-10. **改行为就要改文档**：`README.md` 的行为表、`docs/deploy.md`、`docs/protocol.md` 三处。
+7. **纯服务端模组不发布给客户端**，但判定不出侧向时**宁可多发**。判定依据：Fabric `fabric.mod.json.environment`、NeoForge `@Mod(dist = {...})`（必须真解析 class 注解，见 `ModEnv`）、Modrinth 项目元数据（兜底）。逃生门是 `forcePublish` / `--force-publish`。
+8. **`--once` 模式下 stdout 只能有清单**，所有诊断输出必须走 `diag()`（在 `--once` 时落到 stderr）。
+9. **服务端不得被拖垮。** 模组里的同步逻辑必须 `catch Throwable` 并只打日志；端口被占用、配置写坏都不能影响 Minecraft 服务器。
+10. **同步失败默认放行游戏启动**（只告警），`--strict` 才中止；版本不匹配的默认策略是"加载器提醒 / MC 版本跳过同步"。
+11. **改行为就要改文档**：`README.md` 的行为表、`docs/deploy.md`、`docs/protocol.md` 三处。
 
 ## 代码风格
 
