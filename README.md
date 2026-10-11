@@ -1,5 +1,8 @@
 # ModSync
 
+[![CI](https://github.com/Steve-xmh/mc-modsync/actions/workflows/ci.yml/badge.svg)](https://github.com/Steve-xmh/mc-modsync/actions/workflows/ci.yml)
+[![License: 未指定](https://img.shields.io/badge/license-未指定-lightgrey)](#许可证)
+
 给 Minecraft **NeoForge 1.21.1** 服务器用的一套模组同步方案：**服务器公开一个端口提供摘要清单和文件下载，客户端在游戏启动前完成校验与增量下载，然后把 `mods` 目录重组成最终状态再进游戏。**
 
 针对现有方案（AutoModpack 等）的差异点：
