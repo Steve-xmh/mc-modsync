@@ -10,8 +10,16 @@ echo "############ 1/5 build ############"
 ./build.sh || exit 1
 
 if [[ -x ./build-mod.sh ]]; then
-  ./build-mod.sh >/dev/null 2>&1 && echo "[build] modsync-neoforge jar ok" \
-    || echo "[build] skipped NeoForge mod (no local NeoForge libraries found)"
+  # 区分"没有 NeoForge 依赖所以跳过"与"模组构建真的失败"——后者必须让整个套件红。
+  if ./build-mod.sh >"$ROOT/build/build-mod.log" 2>&1; then
+    echo "[build] modsync-neoforge jar ok"
+  elif [[ -n "${MODSYNC_NEO_LIBS:-}" ]] || ! grep -q '找不到 NeoForge 依赖目录' "$ROOT/build/build-mod.log"; then
+    echo "[build] ✗ NeoForge 模组构建失败：" >&2
+    tail -20 "$ROOT/build/build-mod.log" >&2
+    exit 1
+  else
+    echo "[build] skipped NeoForge mod (no local NeoForge libraries found)"
+  fi
 fi
 
 echo

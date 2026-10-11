@@ -78,8 +78,48 @@ if [[ "${REAL_WARNINGS:-0}" != "0" ]]; then
   exit 1
 fi
 
+# 模组元数据：没有这个文件 FML 根本不会把 jar 当作模组载入。
+cat > "$STAGE/META-INF/neoforge.mods.toml" <<EOF
+modLoader="javafml"
+loaderVersion="[4,)"
+license="LGPL-3.0-or-later"
+
+[[mods]]
+modId="modsync"
+version="$VERSION"
+displayName="ModSync Server"
+description='''
+Publishes this server's mods as a JSON manifest over one HTTP port so that clients can sync
+before the game launches (ModSync client agent). Server-side only; ships no client code.
+'''
+displayTest="IGNORE_ALL_VERSION"
+
+[[dependencies.modsync]]
+    modId="neoforge"
+    type="required"
+    versionRange="[21.0.0-beta,)"
+    ordering="NONE"
+    side="SERVER"
+EOF
+
 cp -R "$CLASSES/." "$STAGE/"
 (cd "$STAGE" && jar --create --file "$OUT/modsync-neoforge-$VERSION.jar" .)
 
-echo "[mod] 产出: $OUT/modsync-neoforge-$VERSION.jar ($(stat -f %z "$OUT/modsync-neoforge-$VERSION.jar") bytes)"
-unzip -l "$OUT/modsync-neoforge-$VERSION.jar" | grep -E 'neoforge.mods.toml|ModSyncMod.class|SyncServer.class' | sed 's/^/      /'
+JAR="$OUT/modsync-neoforge-$VERSION.jar"
+
+# 断言产物真的是一个模组 jar：少一个都不是"能装但没生效"，而是完全不会被载入。
+if ! unzip -l "$JAR" | grep -q 'META-INF/neoforge.mods.toml'; then
+  echo "[mod] ✗ 产物缺少 META-INF/neoforge.mods.toml，NeoForge 不会载入它" >&2
+  exit 1
+fi
+if ! unzip -l "$JAR" | grep -q 'io/modsync/neoforge/ModSyncMod.class'; then
+  echo "[mod] ✗ 产物缺少 io/modsync/neoforge/ModSyncMod.class" >&2
+  exit 1
+fi
+if ! unzip -p "$JAR" 'META-INF/neoforge.mods.toml' | grep -q 'modId="modsync"'; then
+  echo "[mod] ✗ mods.toml 里没有 modId=\"modsync\"" >&2
+  exit 1
+fi
+
+echo "[mod] 产出: $JAR ($(wc -c < "$JAR" | tr -d ' ') bytes)"
+unzip -l "$JAR" | grep -E 'neoforge.mods.toml|ModSyncMod.class|SyncServer.class' | sed 's/^/      /'

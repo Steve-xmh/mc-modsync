@@ -9,6 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # 让 run-all.sh 里的 build-mod.sh 真正构建出服务端模组（含"产物必须是模组 jar"的断言）。
+      # 没有这个变量时，缺少 NeoForge 依赖会让它被跳过，模组 jar 的回归就抓不到。
+      MODSYNC_NEO_LIBS: /tmp/neo-libs
     steps:
       - uses: actions/checkout@v4
 
@@ -18,7 +22,18 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: 运行测试套件
+      - name: 下载 NeoForge API 依赖（用于构建服务端模组）
+        run: |
+          mkdir -p /tmp/neo-libs
+          B=https://maven.neoforged.net/releases
+          curl -sSLo /tmp/neo-libs/neoforge-21.1.248-universal.jar \
+            "$B/net/neoforged/neoforge/21.1.248/neoforge-21.1.248-universal.jar"
+          curl -sSLo /tmp/neo-libs/loader-4.0.43.jar \
+            "$B/net/neoforged/fancymodloader/loader/4.0.43/loader-4.0.43.jar"
+          curl -sSLo /tmp/neo-libs/bus-8.0.5.jar \
+            "$B/net/neoforged/bus/8.0.5/bus-8.0.5.jar"
+
+      - name: 运行测试套件（含 NeoForge 模组构建与产物断言）
         run: bash test/run-all.sh
 
       # 可选：设置 MODSYNC_TEST_ONLINE=1 会额外跑一条需要外网的 Modrinth 直链回填用例。
