@@ -34,6 +34,8 @@ ModSync：给 Minecraft **NeoForge 1.21.1** 服务器用的模组同步方案。
 
 `build-mod.sh` 会按顺序自动找依赖：`$MODSYNC_NEO_LIBS` → 仓库旁的 `server/libraries`、`libraries` → Prism 的 `libraries/`（macOS / Linux / Windows）。找不到时它会退出 1，`run-all.sh` 会把它记为 skipped 而不是失败。
 
+构建完它会对产物做硬断言（缺 `META-INF/neoforge.mods.toml`、缺 `ModSyncMod.class`、`mods.toml` 里没有 `modId="modsync"` 都直接 exit 1）；CI 会下载三个 NeoForge API 依赖并设置 `MODSYNC_NEO_LIBS`，让这个断言在 CI 上真正执行。
+
 ## 测试
 
 ```bash
@@ -75,6 +77,7 @@ bash test/e2e-filter.sh              # 也可以单独跑任意一套
 - **`trash/` 只保留最近 `TRASH_KEEP` 批**，且内容未变的文件要原地保留（否则每次重组都产生垃圾）。
 - **网络环境可能很慢/有代理**：Modrinth 查询的连接超时已放宽到 15 秒且失败只告警一次；Forge/NeoForge 官方安装器把超时硬编码成 5 秒（`sipush 5000`），在网络慢的环境必然失败——`docs/deploy.md` 的排查表里有记录，`build-mod.sh` 不用 Gradle 也是为了绕开它。
 - **测试可移植性**：不要用 `stat -f`（BSD）或 `find -quit`；用测试里的 `file_mtime` / `file_size` / `has_file` 助手。
+- **产物校验必须断言，不能只打印**：曾经把 `unzip -l | grep ... | sed` 当校验用，结果 heredoc 被误删导致发布的模组 jar 少了 `neoforge.mods.toml`（FML 直接不载入，等于装了不生效）而没人发现。凡是「构建产物应该长什么样」的检查，写成 失败即 exit 1 的断言，并让 CI 真的跑到它。
 
 ## 提交约定
 
