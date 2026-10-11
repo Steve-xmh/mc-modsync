@@ -80,7 +80,8 @@ public final class ServerMain {
                 cli.forcePublish,
                 cli.minecraftVersion,
                 cli.loaderType,
-                cli.loaderVersion);
+                cli.loaderVersion,
+                cli.modFiles);
         SyncServer server = new SyncServer(options);
 
         try {
@@ -141,6 +142,7 @@ public final class ServerMain {
     private static final class Cli {
         Path mods = Path.of("./mods");
         final List<Path> extras = new ArrayList<>();
+        final List<Path> modFiles = new ArrayList<>();
         final List<String> excludes = new ArrayList<>();
         int port = 25590;
         String bind = "0.0.0.0";
@@ -194,6 +196,7 @@ public final class ServerMain {
             switch (key) {
                 case "mods" -> cli.mods = Path.of(value(argv, i, key, inline));
                 case "extra" -> cli.extras.add(Path.of(value(argv, i, key, inline)));
+                case "mod-file" -> cli.modFiles.add(Path.of(value(argv, i, key, inline)));
                 case "exclude" -> cli.excludes.add(value(argv, i, key, inline));
                 case "port" -> cli.port = parsePort(value(argv, i, key, inline));
                 case "bind" -> cli.bind = value(argv, i, key, inline);
@@ -220,7 +223,7 @@ public final class ServerMain {
 
     private static boolean takesValue(String key) {
         return switch (key) {
-            case "mods", "extra", "exclude", "port", "bind", "base-url", "pack-name", "server-id",
+            case "mods", "extra", "mod-file", "exclude", "port", "bind", "base-url", "pack-name", "server-id",
                     "state", "write-manifest", "minecraft-version", "loader-type", "loader-version",
                     "force-publish" -> true;
             default -> false;
@@ -269,6 +272,7 @@ public final class ServerMain {
         out.println();
         out.println("  --mods <dir>             primary published directory (default: ./mods)");
         out.println("  --extra <dir>            additional published directory, repeatable");
+        out.println("  --mod-file <jar>         publish this exact jar, repeatable (takes priority)");
         out.println("  --exclude <glob>         skip file names matching a * and ? glob, repeatable");
         out.println("  --port <int>             listen port (default: 25590)");
         out.println("  --bind <addr>            listen address (default: 0.0.0.0)");

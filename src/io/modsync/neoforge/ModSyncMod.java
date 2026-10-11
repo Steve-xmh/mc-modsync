@@ -57,7 +57,14 @@ public final class ModSyncMod {
                 excludes.add(self);
                 System.out.println("[modsync] not publishing our own mod jar: " + self);
             }
+            List<Path> loaded = cfg.publishLoadedMods ? loadedModFiles(gameDir) : List.of();
+            if (cfg.publishLoadedMods && loaded.isEmpty()) {
+                System.out.println("[modsync] WARN FML reported no loaded mods; falling back to scanning mods/");
+            }
             List<Path> dirs = new ArrayList<>();
+            if (cfg.publishLoadedMods && loaded.isEmpty()) {
+                dirs.add(gameDir.resolve("mods"));
+            }
             for (String dir : cfg.modDirs) {
                 dirs.add(gameDir.resolve(dir));
             }
@@ -88,11 +95,16 @@ public final class ModSyncMod {
                     cfg.forcePublish,
                     info == null ? "" : info.mcVersion(),
                     "neoforge",
-                    info == null ? "" : info.neoForgeVersion());
+                    info == null ? "" : info.neoForgeVersion(),
+                    loaded);
             SyncServer server = new SyncServer(options);
             server.generate();
             server.start();
             running = server;
+            if (!loaded.isEmpty()) {
+                System.out.println("[modsync] publishing the " + loaded.size()
+                        + " mod jar(s) FML actually loaded (no directory scan needed)");
+            }
             System.out.println("[modsync] publishing " + server.fileCount() + " files ("
                     + String.format(java.util.Locale.ROOT, "%.1f", server.totalBytes() / (1024.0 * 1024.0))
                     + " MB) at " + server.effectiveBaseUrl() + " - clients sync from "
@@ -159,6 +171,49 @@ public final class ModSyncMod {
         return null;
     }
 
+    /** Mods FML provides itself; their jars must never be shipped to clients. */
+    private static final java.util.Set<String> LOADER_MOD_IDS = java.util.Set.of("minecraft", "neoforge", "forge");
+
+    /**
+     * The jars FML actually loaded on this dedicated server.
+     *
+     * <p>This is the source of truth instead of scanning a directory: it does not care where a mod
+     * file lives, it cannot publish a jar the server is not running, and both jar-in-jar children
+     * (virtual paths) and loader artifacts under {@code libraries/} are skipped automatically.
+     */
+    private static List<Path> loadedModFiles(Path gameDir) {
+        List<Path> files = new ArrayList<>();
+        java.util.Set<Path> seenFiles = new java.util.HashSet<>();
+        Path libraries = gameDir.resolve("libraries").toAbsolutePath().normalize();
+        try {
+            for (Object modInfo : net.neoforged.fml.ModList.get().getMods()) {
+                Object idValue = invokeByInterface(modInfo, "getModId");
+                if (!(idValue instanceof String modId) || modId.isBlank()
+                        || LOADER_MOD_IDS.contains(modId) || "modsync".equals(modId)) {
+                    continue;
+                }
+                Object owning = invokeByInterface(modInfo, "getOwningFile");
+                Object fileInfo = invokeByInterface(owning, "getFile");
+                Object pathValue = invokeByInterface(fileInfo != null ? fileInfo : owning, "getFilePath");
+                if (!(pathValue instanceof Path path)) {
+                    continue;
+                }
+                Path abs = path.toAbsolutePath().normalize();
+                if (!abs.getFileName().toString().endsWith(".jar")
+                        || !Files.isRegularFile(abs)
+                        || abs.startsWith(libraries)
+                        || !seenFiles.add(abs)) {
+                    continue;
+                }
+                files.add(abs);
+            }
+        } catch (Throwable ignored) {
+            // Best effort; callers fall back to the configured directories.
+        }
+        files.sort(java.util.Comparator.comparing(p -> p.getFileName().toString()));
+        return files;
+    }
+
     /** Invokes a public no-arg method found on one of the target's interfaces. */
     private static Object invokeByInterface(Object target, String methodName) {
         if (target == null) {
@@ -178,9 +233,15 @@ public final class ModSyncMod {
         return null;
     }
 
-    /** Mod config; a template is written on first start. */    static final class Config {
+    /** Mod config; a template is written on first start. */
+    static final class Config {
         boolean enabled = true;
-        List<String> modDirs = new ArrayList<>(List.of("mods"));
+        /**
+         * Publish whatever FML actually loaded (recommended). With this on, {@code modDirs} is only
+         * an addition for jars the server does not load itself, e.g. client-only mods.
+         */
+        boolean publishLoadedMods = true;
+        List<String> modDirs = new ArrayList<>();
         List<String> extraDirs = new ArrayList<>(List.of("modsync/extra"));
         List<String> excludes = new ArrayList<>(List.of("modsync-neoforge-*.jar", "modsync-server*.jar"));
         int port = 25590;
@@ -202,6 +263,7 @@ public final class ModSyncMod {
                     Map<String, Object> root = Json.asObject(Json.parse(Files.readString(file, StandardCharsets.UTF_8)));
                     if (root != null) {
                         cfg.enabled = Json.bool(root, "enabled", cfg.enabled);
+                        cfg.publishLoadedMods = Json.bool(root, "publishLoadedMods", cfg.publishLoadedMods);
                         cfg.modDirs = stringList(root.get("modDirs"), cfg.modDirs);
                         cfg.extraDirs = stringList(root.get("extraDirs"), cfg.extraDirs);
                         cfg.excludes = stringList(root.get("excludes"), cfg.excludes);
@@ -221,6 +283,11 @@ public final class ModSyncMod {
                 Files.createDirectories(file.getParent());
                 Files.writeString(file, Json.write(cfg.toJson()) + "\n", StandardCharsets.UTF_8);
                 System.out.println("[modsync] wrote default config to " + file);
+            }
+            if (!cfg.publishLoadedMods && cfg.modDirs.isEmpty()) {
+                // Directory scanning is the only source then; fall back so this still publishes something.
+                cfg.modDirs = new ArrayList<>(List.of("mods"));
+                System.out.println("[modsync] publishLoadedMods=false, scanning mods/ instead");
             }
             return cfg;
         }
@@ -242,6 +309,7 @@ public final class ModSyncMod {
         Map<String, Object> toJson() {
             Map<String, Object> root = Json.map();
             root.put("enabled", enabled);
+            root.put("publishLoadedMods", publishLoadedMods);
             root.put("modDirs", new ArrayList<Object>(modDirs));
             root.put("extraDirs", new ArrayList<Object>(extraDirs));
             root.put("excludes", new ArrayList<Object>(excludes));

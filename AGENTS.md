@@ -55,7 +55,10 @@ bash test/e2e-filter.sh              # 也可以单独跑任意一套
 3. **同 mod id 冲突：服务器优先。** 客户端版本保留在 `mods-client/`，但不参与重组。
 4. **协议向后兼容。** `schema` 保持 `1`，新字段必须是可选的（如 `minecraft`、`loader`）；老客户端遇到不认识的字段要能忽略。改协议必须同步更新 `docs/protocol.md`。
 5. **发布器永不发布自己。** 两种形态都靠运行时拿自身 jar 文件名排除（模组用反射，独立进程用 `CodeSource`）；默认 glob 只是兜底，不要删。
-6. **纯服务端模组不发布给客户端**，但判定不出侧向时**宁可多发**。判定依据：Fabric `fabric.mod.json.environment`、NeoForge `@Mod(dist = {...})`（必须真解析 class 注解，见 `ModEnv`）、Modrinth 项目元数据（兜底）。逃生门是 `forcePublish` / `--force-publish`。
+6. **服务端的发布源是「FML 实际加载的模组」**（`publishLoadedMods`，`ModSyncMod.loadedModFiles()` 反射读 `ModList`），
+   目录扫描（`modDirs`/`extraDirs`）只是补充与回退。不要把它改回"只扫目录"：那样会漏掉不在 `mods/` 的模组，
+   也会把服务器没在运行的 jar 推给玩家。独立进程用 `--mod-file` 对应同一能力。
+11. **纯服务端模组不发布给客户端**，但判定不出侧向时**宁可多发**。判定依据：Fabric `fabric.mod.json.environment`、NeoForge `@Mod(dist = {...})`（必须真解析 class 注解，见 `ModEnv`）、Modrinth 项目元数据（兜底）。逃生门是 `forcePublish` / `--force-publish`。
 7. **`--once` 模式下 stdout 只能有清单**，所有诊断输出必须走 `diag()`（在 `--once` 时落到 stderr）。
 8. **服务端不得被拖垮。** 模组里的同步逻辑必须 `catch Throwable` 并只打日志；端口被占用、配置写坏都不能影响 Minecraft 服务器。
 9. **同步失败默认放行游戏启动**（只告警），`--strict` 才中止；版本不匹配的默认策略是"加载器提醒 / MC 版本跳过同步"。
@@ -77,6 +80,7 @@ bash test/e2e-filter.sh              # 也可以单独跑任意一套
 - **`trash/` 只保留最近 `TRASH_KEEP` 批**，且内容未变的文件要原地保留（否则每次重组都产生垃圾）。
 - **网络环境可能很慢/有代理**：Modrinth 查询的连接超时已放宽到 15 秒且失败只告警一次；Forge/NeoForge 官方安装器把超时硬编码成 5 秒（`sipush 5000`），在网络慢的环境必然失败——`docs/deploy.md` 的排查表里有记录，`build-mod.sh` 不用 Gradle 也是为了绕开它。
 - **测试可移植性**：不要用 `stat -f`（BSD）或 `find -quit`；用测试里的 `file_mtime` / `file_size` / `has_file` 助手。
+- **`set -o pipefail` 下别把 `外部命令 | grep -q` 当断言**：`grep -q` 命中即退出会让左端收到 SIGPIPE（退出码 141），整条管道被判失败，而且只在输出够大时才稳定复现。先把输出落到文件再匹配（`build-mod.sh` 的产物断言就是这么写的）。
 - **产物校验必须断言，不能只打印**：曾经把 `unzip -l | grep ... | sed` 当校验用，结果 heredoc 被误删导致发布的模组 jar 少了 `neoforge.mods.toml`（FML 直接不载入，等于装了不生效）而没人发现。凡是「构建产物应该长什么样」的检查，写成 失败即 exit 1 的断言，并让 CI 真的跑到它。
 
 ## 提交约定

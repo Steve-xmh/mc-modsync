@@ -6,7 +6,7 @@
 
 | 组件 | 在哪 | 说明 |
 | --- | --- | --- |
-| `modsync-neoforge-<ver>.jar` | 服务器 `mods/` | 推荐方式：服务器自己发布清单（单端口，无额外进程） |
+| `modsync-neoforge-<ver>.jar` | 服务器 `mods/` | **推荐**：装上就完事。启动时自动读取 FML 已加载的模组并发布（单端口，无额外进程、无需配置目录） |
 | `modsync-server.jar` | 服务器任意目录 | 等价替代：独立进程，适合非 NeoForge/不能改 mods 的场景 |
 | `modsync-agent.jar` | 玩家实例内 | 预启动同步；同时是 `-javaagent` 和可执行 jar |
 
@@ -19,18 +19,21 @@
 ```bash
 # 在有 JDK 21 的机器上构建（无需 Gradle，对着本地 NeoForge 依赖编译即可）
 ./build.sh
-./build-mod.sh                        # 产出 build/modsync-neoforge-1.0.0.jar
+./build-mod.sh                        # 产出 build/modsync-neoforge-1.1.0.jar
 ./build-mod.sh --neo-libs /path/to/neoforge/libraries   # 或显式指定依赖来源
 ```
 
-把 `build/modsync-neoforge-1.0.0.jar` 放进服务器 `mods/`，启动一次服务器，会生成
-`config/modsync-server.json`：
+把 `build/modsync-neoforge-1.1.0.jar` 放进服务器 `mods/`，重启服务器即可 —— **不需要第二个进程，也不需要登记要发布哪些目录**。
+模组启动时会向 FML 询问这台服务器**实际加载了哪些模组文件**，直接以那些 jar 作为发布源（`publishLoadedMods`）。
+首次启动会生成 `config/modsync-server.json`：
 
 ```json
 {
   "enabled": true,
-  "modDirs": ["mods"],                 // 发布目录（相对服务器根目录），可多个
-  "extraDirs": ["modsync/extra"],      // 额外发布目录：只给客户端、服务端不加载的模组放这里
+  "publishLoadedMods": true,           // 发布 FML 实际加载的模组（推荐；服务器跑什么就发什么）
+  "modDirs": [],                       // 额外发布目录（相对服务器根目录），可多个。
+                                       // 只有"服务器不加载、但玩家需要"的 jar 才需要填这里
+  "extraDirs": ["modsync/extra"],      // 同上，专门给客户端专用模组用的投放目录（自动创建）
   "excludes": ["modsync-neoforge-*.jar", "modsync-server*.jar"],
                                        // 不发布的文件名 glob（可重复）。模组启动时会自动把
                                        // 「自己这个 jar」也加进来，所以就算你改了 jar 名也不会被发出去
@@ -48,9 +51,22 @@
 改完配置重启服务器。启动日志应出现：
 
 ```
-[modsync] publishing 27 files (412.3 MB) at http://play.example.com:25590/modsync - clients sync from http://play.example.com:25590/modsync/manifest.json
+[modsync] publishing the 27 mod jar(s) FML actually loaded (no directory scan needed)
+[modsync] publishing 26 files (412.3 MB) at http://play.example.com:25590/modsync - clients sync from http://play.example.com:25590/modsync/manifest.json
+[modsync-server] skipping server-only mod (clients do not need it): Chunky-1.4.36.jar [from mod metadata]
 [modsync] announcing Minecraft 1.21.1 / NeoForge 21.1.248 so clients can be told to upgrade their loader when needed
 ```
+
+**发布范围（谁会被发出去）**
+
+| 情况 | 结果 |
+| --- | --- |
+| 服务器加载的模组（不论放在哪个目录） | 发布 |
+| 客户端专用、服务器不加载的模组（Sodium / 光影 / 小地图…） | 默认**不发布**；放进 `modsync/extra/` 或写进 `modDirs` 才会发布 |
+| `mods/` 里存在但服务器**没有加载**的 jar（被 FML 拒绝、放错地方） | 不发布。这正是"发布已加载"的用意：推给玩家的一定是服务器真在跑的东西 |
+| 加载器自身（`minecraft` / `neoforge`）、jar-in-jar 嵌套的虚拟文件 | 不发布（自动） |
+| ModSync 模组自己 | 不发布（自动，改名也一样） |
+| 判定为纯服务端的模组 | 不发布（见 1.4，可用 `forcePublish` 覆盖） |
 
 自检（服务器本机或外网）：
 
@@ -62,31 +78,16 @@ curl http://<服务器IP>:25590/modsync/manifest.json | head -40
 **要点**
 - **发布器永不发布自己**：模组形态在启动时反射读出自身 jar 的文件名并加进排除（**改文件名也不会漏**，日志 `not publishing our own mod jar: ...`）；独立进程形态同样按运行位置排除（日志 `not publishing our own jar: ...`）。默认 glob `modsync-neoforge-*.jar` / `modsync-server*.jar` 只是兜底。
 - 只想给客户端、服务端不加载的模组（Sodium/Iris/光影类）：放进 `modsync/extra/`，模组会自动创建这个目录。它们同样会被同步，但不会被服务端加载。注意这类模组若声明了 `displayTest="IGNORE_SERVER_VERSION"`（或 `@Mod(dist=CLIENT)`）时才允许玩家带着它进服。
-- 服务端加载的模组 = `mods/`，两端都会装；`extra/` = 只有客户端装。这个划分决定玩家能否顺利进服，必要时用 `excludes` 把"服务端私有"的模组排除，别同步给玩家（纯服务端的模组现在会自动过滤，见 1.4）。
+- 两端都要装的模组 = 服务器加载的那批（自动发布）；只有客户端要装的 = `modsync/extra/` 或 `modDirs`。这个划分决定玩家能否顺利进服。
+- 关掉自动识别（`"publishLoadedMods": false`）会退回「扫描目录」模式，此时 `modDirs` 为空会自动退回 `["mods"]`。
 - `--modrinth-lookup`/`modrinthLookup` 打开后，命中 Modrinth 的文件会让客户端走 CDN，省服务器上行带宽，同时作者的下载量也记上了。
-
-### 1.4 自动过滤纯服务端模组
-
-服务端常有一些**客户端完全不需要**的模组（性能优化、区块预生成、管理/反作弊工具）。把它们推给玩家只会浪费带宽，有时还会让客户端崩溃。发布器默认开启过滤，按可靠性依次判定：
-
-| 判定来源 | 依据 | 说明 |
-| --- | --- | --- |
-| Fabric 元数据 | `fabric.mod.json` 的 `environment: "server"` | 显式声明，最可靠 |
-| NeoForge / Forge 注解 | `@Mod(dist = { Dist.DEDICATED_SERVER })` | 直接解析 jar 里 class 文件的 `RuntimeVisibleAnnotations`，**不是**字符串匹配——所以「代码里引用了 `Dist.DEDICATED_SERVER` 的双端模组」不会被误判 |
-| Modrinth 元数据 | 项目 `server_side=required` 且 `client_side=unsupported` | 只在开启 `modrinthLookup` 时作为兜底 |
-| 无法判定 | 无以上信息 | **照常发布**（宁可多发，不可漏发） |
-
-行为细节：
-- 被跳过的文件会在日志里明确写出原因：`[modsync-server] skipping server-only mod (clients do not need it): xxx.jar [from mod metadata]`；
-- 判定结果是「双端」的一律发布：不写 `dist`（默认就是两端）、显式写 `{CLIENT, DEDICATED_SERVER}` 都算双端；
-- 误判时的逃生门：`forcePublish`（模组配置）/ `--force-publish <glob>`（独立进程）；- 想完全关闭：`filterServerOnlyMods: false` / `--no-filter-server-only`；
-- 客户端侧自愈：某个模组以前同步过、后来被过滤掉，客户端下次启动会把它从 `mods-server/` 与 `mods/` 移除（进 `modsync/trash/`），不会长期残留。
 
 ### 1.2 方式 B：独立进程
 
 ```bash
 java -jar modsync-server.jar \
   --mods ./mods --extra ./modsync/extra \
+  --mod-file /srv/shared/special.jar \   # 精确发布某个文件，优先级高于目录（可重复）
   --exclude 'secret-*.jar' \
   --port 25590 --bind 0.0.0.0 \
   --base-url http://play.example.com:25590/modsync \
@@ -126,6 +127,23 @@ java -jar modsync-server.jar --mods ./mods --extra ./modsync/extra \
 ```
 
 客户端只需要 HTTP GET，任何静态托管都能用；代价是没有按玩家鉴权。
+
+### 1.4 自动过滤纯服务端模组
+
+服务端常有一些**客户端完全不需要**的模组（性能优化、区块预生成、管理/反作弊工具）。把它们推给玩家只会浪费带宽，有时还会让客户端崩溃。发布器默认开启过滤，按可靠性依次判定：
+
+| 判定来源 | 依据 | 说明 |
+| --- | --- | --- |
+| Fabric 元数据 | `fabric.mod.json` 的 `environment: "server"` | 显式声明，最可靠 |
+| NeoForge / Forge 注解 | `@Mod(dist = { Dist.DEDICATED_SERVER })` | 直接解析 jar 里 class 文件的 `RuntimeVisibleAnnotations`，**不是**字符串匹配——所以「代码里引用了 `Dist.DEDICATED_SERVER` 的双端模组」不会被误判 |
+| Modrinth 元数据 | 项目 `server_side=required` 且 `client_side=unsupported` | 只在开启 `modrinthLookup` 时作为兜底 |
+| 无法判定 | 无以上信息 | **照常发布**（宁可多发，不可漏发） |
+
+行为细节：
+- 被跳过的文件会在日志里明确写出原因：`[modsync-server] skipping server-only mod (clients do not need it): xxx.jar [from mod metadata]`；
+- 判定结果是「双端」的一律发布：不写 `dist`（默认就是两端）、显式写 `{CLIENT, DEDICATED_SERVER}` 都算双端；
+- 误判时的逃生门：`forcePublish`（模组配置）/ `--force-publish <glob>`（独立进程）；- 想完全关闭：`filterServerOnlyMods: false` / `--no-filter-server-only`；
+- 客户端侧自愈：某个模组以前同步过、后来被过滤掉，客户端下次启动会把它从 `mods-server/` 与 `mods/` 移除（进 `modsync/trash/`），不会长期残留。
 
 ## 2. 客户端部署
 
@@ -223,6 +241,8 @@ java -jar modsync-agent.jar --game-dir /path/to/.minecraft \
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
+| 客户端缺某个模组 | 服务器没加载它（看服务器启动日志有没有 FML 的报错/拒绝），把它放进 `modsync/extra/` 或写进 `modDirs`；纯服务端模组被过滤时日志会有 `skipping server-only mod` |
+| 想换端口 | 改 `config/modsync-server.json` 的 `port` 后重启服务器，并同步放行新端口（客户端 `manifestUrl` 也要改） |
 | 模组日志 `BindException` | 25590 被占用（如另一个 ModSync 进程）。改 `port` 或停掉占用者；模组会给出提示且不影响服务器运行 |
 | 每次启动都重下全部文件 | 服务端文件在变（mtime 无关，看 sha256）；或客户端 `state.json` 被删；或 `serverId` 变了（换目录/删状态文件）→ 视为换服全量重同步 |
 | 玩家进服被拒（模组不匹配界面） | 客户端多/少了"服务端要求"的模组：把该模组放到 `modsync/extra/`（客户端专用，需 `displayTest=IGNORE_SERVER_VERSION`）或从发布集合里用 `excludes` 排除 |

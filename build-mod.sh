@@ -14,7 +14,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$ROOT/build"
-VERSION="${MODSYNC_MOD_VERSION:-1.0.0}"
+VERSION="${MODSYNC_MOD_VERSION:-1.1.0}"
 
 NEOLIBS=""
 while [[ $# -gt 0 ]]; do
@@ -108,15 +108,21 @@ cp -R "$CLASSES/." "$STAGE/"
 JAR="$OUT/modsync-neoforge-$VERSION.jar"
 
 # 断言产物真的是一个模组 jar：少一个都不是"能装但没生效"，而是完全不会被载入。
-if ! unzip -l "$JAR" | grep -q 'META-INF/neoforge.mods.toml'; then
+#
+# 注意不要把这里写成 `unzip -l "$JAR" | grep -q ...`：本脚本开了 pipefail，而 grep -q 命中后
+# 立刻退出会让 unzip 收到 SIGPIPE（退出码 141），整条管道被判失败 —— jar 越大越容易踩到。
+# 所以先把输出落到文件，再对文件做匹配。
+unzip -l "$JAR" > "$OUT/mod-jar-listing.txt" 2>/dev/null || true
+if ! grep -q 'META-INF/neoforge.mods.toml' "$OUT/mod-jar-listing.txt"; then
   echo "[mod] ✗ 产物缺少 META-INF/neoforge.mods.toml，NeoForge 不会载入它" >&2
   exit 1
 fi
-if ! unzip -l "$JAR" | grep -q 'io/modsync/neoforge/ModSyncMod.class'; then
+if ! grep -q 'io/modsync/neoforge/ModSyncMod.class' "$OUT/mod-jar-listing.txt"; then
   echo "[mod] ✗ 产物缺少 io/modsync/neoforge/ModSyncMod.class" >&2
   exit 1
 fi
-if ! unzip -p "$JAR" 'META-INF/neoforge.mods.toml' | grep -q 'modId="modsync"'; then
+unzip -p "$JAR" 'META-INF/neoforge.mods.toml' > "$OUT/mod-mods-toml.txt" 2>/dev/null || true
+if ! grep -q 'modId="modsync"' "$OUT/mod-mods-toml.txt"; then
   echo "[mod] ✗ mods.toml 里没有 modId=\"modsync\"" >&2
   exit 1
 fi

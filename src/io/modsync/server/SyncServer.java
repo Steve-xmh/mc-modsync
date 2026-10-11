@@ -87,7 +87,9 @@ public final class SyncServer implements AutoCloseable {
             List<String> forcePublish,
             String mcVersion,
             String loaderType,
-            String loaderVersion) {}
+            String loaderVersion,
+            /* Exact jars to publish: the NeoForge mod passes whatever FML actually loaded. */
+            List<Path> explicitFiles) {}
 
     /** One published jar. {@code path} is always {@code mods/<file name>}. */
     private record FileEntry(String path, String sha256, long size, String modId, String url, Path source) {}
@@ -199,58 +201,43 @@ public final class SyncServer implements AutoCloseable {
         Map<String, Path> seenByPath = new LinkedHashMap<>();
         HttpClient client = opt.modrinthLookup() ? newHttpClient() : null;
         long total = 0;
-        List<Path> dirs = opt.modDirs() == null ? List.of() : opt.modDirs();
-        for (Path dir : dirs) {
-            if (dir == null) {
+        for (Path file : candidateFiles()) {
+            String name = file.getFileName().toString();
+            if (!isPublishable(name) || matchesExclude(name)) {
                 continue;
             }
-            if (!Files.isDirectory(dir)) {
-                diag("[modsync-server] WARN mods directory not found: " + dir);
+            String manifestPath = "mods/" + name;
+            Path previous = seenByPath.putIfAbsent(manifestPath, file);
+            if (previous != null) {
+                diag("[modsync-server] WARN duplicate file name '" + name + "', keeping " + previous);
                 continue;
             }
-            List<Path> candidates = new ArrayList<>();
-            try (Stream<Path> stream = Files.list(dir)) {
-                stream.filter(Files::isRegularFile).forEach(candidates::add);
-            }
-            candidates.sort(Comparator.comparing(p -> p.getFileName().toString()));
-            for (Path file : candidates) {
-                String name = file.getFileName().toString();
-                if (!isPublishable(name) || matchesExclude(name)) {
-                    continue;
-                }
-                String manifestPath = "mods/" + name;
-                Path previous = seenByPath.putIfAbsent(manifestPath, file);
-                if (previous != null) {
-                    diag("[modsync-server] WARN duplicate file name '" + name + "', keeping " + previous);
-                    continue;
-                }
-                ModrinthInfo modrinth = client == null ? null : modrinthLookup(client, file);
-                if (opt.filterServerOnly() && !matchesAny(forcePatterns, name)) {
-                    ModEnv.Env env = ModEnv.detect(file);
-                    boolean serverOnly = env == ModEnv.Env.SERVER_ONLY
-                            || (env == ModEnv.Env.UNKNOWN && modrinth != null && modrinth.serverOnly());
-                    if (serverOnly) {
-                        diag("[modsync-server] skipping server-only mod (clients do not need it): " + name
-                                + (env == ModEnv.Env.SERVER_ONLY
-                                        ? " [from mod metadata]"
-                                        : " [from Modrinth metadata]")
-                                + " (use --force-publish '" + name + "' to publish it anyway)");
-                        seenByPath.remove(manifestPath);
-                        continue;
-                    }
-                }
-                try {
-                    String sha = ModMeta.sha256(file);
-                    long size = Files.size(file);
-                    String modId = ModMeta.readModId(file);
-                    found.add(new FileEntry(manifestPath, sha, size, modId,
-                            modrinth == null ? null : modrinth.url(),
-                            file.toAbsolutePath().normalize()));
-                    total += size;
-                } catch (IOException e) {
+            ModrinthInfo modrinth = client == null ? null : modrinthLookup(client, file);
+            if (opt.filterServerOnly() && !matchesAny(forcePatterns, name)) {
+                ModEnv.Env env = ModEnv.detect(file);
+                boolean serverOnly = env == ModEnv.Env.SERVER_ONLY
+                        || (env == ModEnv.Env.UNKNOWN && modrinth != null && modrinth.serverOnly());
+                if (serverOnly) {
+                    diag("[modsync-server] skipping server-only mod (clients do not need it): " + name
+                            + (env == ModEnv.Env.SERVER_ONLY
+                                    ? " [from mod metadata]"
+                                    : " [from Modrinth metadata]")
+                            + " (use --force-publish '" + name + "' to publish it anyway)");
                     seenByPath.remove(manifestPath);
-                    diag("[modsync-server] WARN skipping " + file + ": " + e);
+                    continue;
                 }
+            }
+            try {
+                String sha = ModMeta.sha256(file);
+                long size = Files.size(file);
+                String modId = ModMeta.readModId(file);
+                found.add(new FileEntry(manifestPath, sha, size, modId,
+                        modrinth == null ? null : modrinth.url(),
+                        file.toAbsolutePath().normalize()));
+                total += size;
+            } catch (IOException e) {
+                seenByPath.remove(manifestPath);
+                diag("[modsync-server] WARN skipping " + file + ": " + e);
             }
         }
         found.sort(Comparator.comparing(FileEntry::path));
@@ -267,6 +254,51 @@ public final class SyncServer implements AutoCloseable {
         this.generatedAt = TIMESTAMP.format(Instant.now());
         this.generated = true;
         this.viewCache.clear();
+    }
+
+    /**
+     * Candidate jars in priority order: files handed over explicitly (the NeoForge mod passes the
+     * jars FML actually loaded, which wins over the directories), then the configured directories.
+     *
+     * <p>Deduplicated by real path, so a jar that is both loaded and present in {@code mods/} is
+     * only considered once.
+     */
+    private List<Path> candidateFiles() throws IOException {
+        List<Path> files = new ArrayList<>();
+        java.util.Set<Path> seen = new java.util.HashSet<>();
+        for (Path file : opt.explicitFiles() == null ? List.<Path>of() : opt.explicitFiles()) {
+            if (file != null && Files.isRegularFile(file) && seen.add(realOrAbsolute(file))) {
+                files.add(file);
+            }
+        }
+        for (Path dir : opt.modDirs() == null ? List.<Path>of() : opt.modDirs()) {
+            if (dir == null) {
+                continue;
+            }
+            if (!Files.isDirectory(dir)) {
+                diag("[modsync-server] WARN mods directory not found: " + dir);
+                continue;
+            }
+            List<Path> inDir = new ArrayList<>();
+            try (Stream<Path> stream = Files.list(dir)) {
+                stream.filter(Files::isRegularFile).forEach(inDir::add);
+            }
+            inDir.sort(Comparator.comparing(p -> p.getFileName().toString()));
+            for (Path file : inDir) {
+                if (seen.add(realOrAbsolute(file))) {
+                    files.add(file);
+                }
+            }
+        }
+        return files;
+    }
+
+    private static Path realOrAbsolute(Path path) {
+        try {
+            return path.toRealPath();
+        } catch (IOException e) {
+            return path.toAbsolutePath().normalize();
+        }
     }
 
     private void warnDuplicateModIds(List<FileEntry> found) {

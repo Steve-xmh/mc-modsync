@@ -189,6 +189,35 @@ else
 fi
 rm -f "$MODS/modsync-server.jar"
 
+say "T5 --mod-file：发布 FML 实际加载的文件（可位于 --mods 之外）"
+mkdir -p "$WORK/elsewhere"
+make_neo_jar "$WORK/elsewhere/external-2.0.jar" external_mod BothDefaultMod.class
+gen "$WORK/m5.json" --mod-file "$WORK/elsewhere/external-2.0.jar"
+LIST5="$(published "$WORK/m5.json")"
+if echo "$LIST5" | grep -qx "external-2.0.jar"; then
+  pass "目录之外的 --mod-file 被发布"
+else
+  fail "--mod-file 未被发布"
+fi
+if echo "$LIST5" | grep -qx "plain-nometa-1.0.jar"; then
+  pass "目录扫描仍然生效（两者可以并存）"
+else
+  fail "目录扫描被破坏"
+fi
+
+say "T6 --mod-file 与目录里的同一文件：只算一次、不报重复"
+gen "$WORK/m6.json" --mod-file "$MODS/neo-bothdefault-1.0.jar"
+LIST6="$(published "$WORK/m6.json")"
+COUNT6="$(echo "$LIST6" | grep -c .)"
+DUPES="$(echo "$LIST6" | grep -cx 'neo-bothdefault-1.0.jar')"
+if [ "$DUPES" = "1" ]; then pass "同一文件只出现一次"; else fail "同一文件出现 $DUPES 次"; fi
+if [ "$COUNT6" = "7" ]; then pass "总数仍为 7（未因重复参数变多）"; else fail "期望 7，实际 $COUNT6"; fi
+if grep -q 'duplicate file name' "$WORK/diag.txt"; then
+  fail "同一路径被误报为重名"
+else
+  pass "同一路径没有被误报为重名"
+fi
+
 echo
 echo "======================================"
 echo "通过 $PASS 项，失败 $FAILED 项"

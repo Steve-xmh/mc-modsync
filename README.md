@@ -9,6 +9,7 @@
 
 - **真正的启动前同步**：同步发生在 Minecraft 主类加载之前（`-javaagent` 或 Prism 预启动命令），不存在「进服务器才下载、下载完还得重启」的循环。
 - **玩家自装模组是一等公民**：`mods-client/` 只读、绝不被同步逻辑删除或覆盖；同 mod id 冲突时**服务器版本优先**，玩家那份保留在 `mods-client/` 里。
+- **服务端只需要装一个模组**：模组启动时直接读取 FML **实际加载**的模组文件作为发布源（`publishLoadedMods`），完全不依赖目录布局；端口、排除规则等都在 `config/modsync-server.json` 里改。
 - **自动过滤纯服务端模组**：性能/管理类的服务端专属模组不会推给玩家（识别 Fabric `environment: server`、NeoForge `@Mod(dist=DEDICATED_SERVER)`——真解析 class 注解，不会把「代码里引用了 Dist 的双端模组」误判）。
 - **发布器永远不会把自己发给玩家**：模组形态与独立进程形态都在运行时排除自身 jar（**改了文件名字也不会漏**），默认 glob 只是兜底。
 - **服务器升级会提醒玩家**：清单带上服务器的 Minecraft / 加载器版本，客户端启动前比对并给出「去启动器把 NeoForge 改成 X」的具体路径，可配置为仅提醒或直接中止启动。
@@ -40,30 +41,59 @@
 # build/modsync-server.jar   服务端（独立进程）
 # build/modsync-agent.jar    客户端（同时是 -javaagent 和可执行 jar）
 ./build-mod.sh                # 可选：NeoForge 服务端模组（对着本地 NeoForge 依赖编译，不需要 Gradle）
-# build/modsync-neoforge-1.0.0.jar
+# build/modsync-neoforge-1.1.0.jar
 ```
 
 ### 2. 服务端
 
-把要发布的模组放进服务器的 `mods/`（或单独的发布目录），启动同步服务：
+#### 方式 A：NeoForge 模组（推荐：装完就完事）
+
+把 `modsync-neoforge-1.1.0.jar` 丢进服务器 `mods/`，重启服务器即可 —— 不用起第二个进程，也不用登记任何目录。
+模组启动时会问 FML **这台服务器实际加载了哪些模组文件**，直接把那些 jar 当作发布源：
+
+```jsonc
+// config/modsync-server.json（首次启动自动生成）
+{
+  "enabled": true,
+  "publishLoadedMods": true,       // 发布 FML 实际加载的模组（推荐）
+  "modDirs": [],                   // 额外发布的目录：只有服务器不加载的 jar 才需要填
+  "extraDirs": ["modsync/extra"],  // 只给客户端、服务端不加载的模组放这里（自动创建）
+  "port": 25590,                   // 想换端口改这里
+  "bind": "0.0.0.0"
+  // ...其余见 docs/deploy.md
+}
+```
+
+意义在于：**服务器跑什么就发布什么** —— 模组放在 `mods/`、子目录还是别的加载器目录都无所谓，既不会漏，
+也不会把服务器没在运行的 jar 推给玩家。加载器自身（`minecraft`/`neoforge`）与 ModSync 自己会自动排除。
+
+```
+[modsync] publishing the 27 mod jar(s) FML actually loaded (no directory scan needed)
+[modsync] publishing 26 files (412.3 MB) at http://...:25590/modsync
+[modsync-server] skipping server-only mod (clients do not need it): Chunky-1.4.36.jar [from mod metadata]
+```
+
+> 客户端专用、服务端不加载的模组（Sodium / 光影 / 小地图等）放进 `modsync/extra/`，或写进 `modDirs`。
+
+#### 方式 B：独立进程（不方便改 `mods/`，或想静态托管时）
 
 ```bash
 java -jar modsync-server.jar \
-  --mods ./mods \                 # 主要发布目录（默认 ./mods）
+  --mods ./mods \                 # 发布目录（默认 ./mods）
   --extra ./modsync/extra \       # 额外发布目录：客户端专用模组放这里（可重复）
+  --mod-file /srv/shared/x.jar \  # 直接发布某个文件，优先级高于目录（可重复）
   --exclude 'secret-*.jar' \      # 不发布的文件名 glob（可重复）
-  --port 25566 --bind 0.0.0.0 \
-  --base-url http://play.example.com:25566/modsync \
+  --port 25590 --bind 0.0.0.0 \
+  --base-url http://play.example.com:25590/modsync \
   --pack-name "我的整合包"
 ```
 
 防火墙只需放行这一个端口。启动后会打印：
 
 ```
-[modsync-server] published 27 files, 128.4 MB, pack=我的整合包, id=1f3c..., listening on http://0.0.0.0:25566/modsync
+[modsync-server] published 27 files, 128.4 MB, pack=我的整合包, id=1f3c..., listening on http://0.0.0.0:25590/modsync
 ```
 
-服务器不加载这些文件（独立进程），从服务器 `mods/` 里取文件即可，也可以指向单独目录。
 `--modrinth-lookup` 会按 sha1 查询 Modrinth 并把官方直链写进清单，客户端优先走 CDN，省服务器带宽且作者能拿到下载量。
 
 > 只想要清单、不想跑常驻进程？`--once --write-manifest manifest.json` 生成清单，连同 `files/` 目录丢到任意静态托管（GitHub Pages / Netlify / 对象存储）也能用：agent 只需要 HTTP GET。
@@ -141,12 +171,13 @@ java -jar modsync-agent.jar --game-dir /path/to/.minecraft --manifest-url http:/
 | 服务器 NeoForge 版本与本地不同 | 启动前大字提示 + 弹窗写明升级路径，默认仍继续同步（`loaderMismatch: abort` 可改为中止启动） |
 | 服务器 Minecraft 版本与本地不同 | 默认**跳过同步**并提示换成对应版本（跨版本模组会崩），仍放行启动 |
 | 服务器模组被判定为纯服务端 | 根本不发布给客户端（Fabric `environment` / NeoForge `@Mod(dist)` / Modrinth 元数据，见 deploy.md 1.4） |
+| jar 在 `mods/` 里但服务器没加载它 | 模组形态下不会发布（发布源是「已加载」而非「目录里有」）；要强行发布就放进 `modsync/extra/` 或 `modDirs` |
 
 ## 端到端验证
 
 ```bash
 bash test/run-all.sh
-# agent 场景 33 项 + 版本比对 19 项 + 服务端模组过滤 16 项 + 全栈（真服务端 + 真 agent）23 项
+# agent 场景 33 项 + 版本比对 19 项 + 发布范围/过滤 21 项 + 全栈（真服务端 + 真 agent）23 项 = 96 项
 
 MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Modrinth 直链回填用例
 ```
@@ -154,7 +185,8 @@ MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Mo
 覆盖：首次同步、幂等不重写、`--dry-run`、玩家自装模组共存、同 id 冲突服务器优先、误放 `mods/` 的迁移、
 服务器增删改的增量下载、本地篡改（同大小不同内容）检测、ETag/304、404/400、`-javaagent` 入口、
 `--once` 清单结构、`--exclude` 与 `--extra`、加载器/MC 版本比对（含 Prism `mmc-pack.json` 自动探测）、
-纯服务端模组过滤（Fabric 环境字段、NeoForge `dist` 注解的四种形态、`force-publish` 覆盖）。
+纯服务端模组过滤（Fabric 环境字段、NeoForge `dist` 注解的四种形态、`force-publish` 覆盖）、
+发布范围（`--mod-file` 精确指定、同一文件同时来自目录与显式指定时只算一次且不误报重名）。
 
 ## 安全模型（重要）
 
