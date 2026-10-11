@@ -1,0 +1,17 @@
+# 构建产物
+/build/
+*.class
+
+# 本机/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# 本地运行产生的状态（独立进程形态）
+/modsync-server.json
+/modsync-server-state.json
+/mods/
+/modsync/extra/

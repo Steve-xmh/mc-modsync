@@ -1,0 +1,83 @@
+# AGENTS.md
+
+给在本仓库里工作的 AI 代理（以及第一次读代码的人）的速查说明。**先读这一页，再看 `README.md` 与 `docs/deploy.md`。**
+
+## 这是什么
+
+ModSync：给 Minecraft **NeoForge 1.21.1** 服务器用的模组同步方案。
+
+- 服务端把 `mods/`（以及可选的客户端专用目录）发布成一份 JSON 清单，公开一个 HTTP 端口；
+- 客户端 agent 在**游戏启动前**校验/增量下载，然后把 `mods/` 目录重组出来；
+- 玩家自己装在 `mods-client/` 的模组永不被删改；同 mod id 冲突时服务器版本优先。
+
+## 仓库结构
+
+| 路径 | 作用 |
+| --- | --- |
+| `src/io/modsync/common/` | `Json`（无依赖 JSON）、`Args`（CLI/agent 参数）、`ModMeta`（sha256/sha1、modId 提取）、`ModEnv`（服务端/客户端侧向判定） |
+| `src/io/modsync/server/` | `SyncServer`（清单生成 + HTTP 服务 + 过滤）、`ServerMain`（独立进程 CLI） |
+| `src/io/modsync/agent/` | `Agent`（`premain`/`main` 双入口）、`Syncer`（同步核心）、`Manifest`、`State`、`ClientVersion`、`Progress`/`GuiProgress`、`AgentConfig` |
+| `src/io/modsync/neoforge/` | `ModSyncMod`：把 `SyncServer` 挂到 NeoForge 生命周期的外壳（`mods/` 里一个 jar 即可） |
+| `build.sh` | 编译 agent + 独立服务端 jar（javac + jar，**不需要 Gradle**） |
+| `build-mod.sh` | 编译 NeoForge 模组（对着本地已有的 NeoForge 依赖编译） |
+| `test/` | 5 套端到端测试 + `run-all.sh` |
+| `docs/protocol.md` | manifest / HTTP 协议规范（v1） |
+| `docs/deploy.md` | 真实服务器部署手册（含排查表与踩坑记录） |
+
+## 构建
+
+```bash
+./build.sh                 # → build/modsync-agent.jar, build/modsync-server.jar
+./build-mod.sh             # → build/modsync-neoforge-<ver>.jar（需要本地 NeoForge 依赖）
+./build-mod.sh --neo-libs /path/to/neoforge/libraries   # 或显式指定依赖来源
+```
+
+`build-mod.sh` 会按顺序自动找依赖：`$MODSYNC_NEO_LIBS` → 仓库旁的 `server/libraries`、`libraries` → Prism 的 `libraries/`（macOS / Linux / Windows）。找不到时它会退出 1，`run-all.sh` 会把它记为 skipped 而不是失败。
+
+## 测试
+
+```bash
+bash test/run-all.sh                 # 5 套：agent / 版本比对 / 服务端模组过滤 / 全栈
+MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Modrinth 直链用例
+bash test/e2e-filter.sh              # 也可以单独跑任意一套
+```
+
+测试只依赖 JDK 21、`python3`、`curl`、`jar`/`javac`；CI 在 ubuntu-latest 上跑 `run-all.sh`。
+
+## 改动时必须保持的约束
+
+这些不是风格偏好，破坏它们会造成真实事故：
+
+1. **零第三方依赖。** 两个 jar 只允许用 JDK（`java.net.http`、`com.sun.net.httpserver`、`java.util.zip`…）。不要引入 Gson/Netty/Guava，也不要引入 Gradle 工程；模组编译靠 `build-mod.sh` 对着本地依赖 javac。
+2. **玩家的文件不可删。** `mods-client/` 只读；只有 `state.json` 里记录为 agent 自己部署过的文件才允许动；替换/删除一律先进 `modsync/trash/`。玩家误丢进 `mods/` 的 jar 是**迁移**到 `mods-client/`，不是删除。
+3. **同 mod id 冲突：服务器优先。** 客户端版本保留在 `mods-client/`，但不参与重组。
+4. **协议向后兼容。** `schema` 保持 `1`，新字段必须是可选的（如 `minecraft`、`loader`）；老客户端遇到不认识的字段要能忽略。改协议必须同步更新 `docs/protocol.md`。
+5. **发布器永不发布自己。** 两种形态都靠运行时拿自身 jar 文件名排除（模组用反射，独立进程用 `CodeSource`）；默认 glob 只是兜底，不要删。
+6. **纯服务端模组不发布给客户端**，但判定不出侧向时**宁可多发**。判定依据：Fabric `fabric.mod.json.environment`、NeoForge `@Mod(dist = {...})`（必须真解析 class 注解，见 `ModEnv`）、Modrinth 项目元数据（兜底）。逃生门是 `forcePublish` / `--force-publish`。
+7. **`--once` 模式下 stdout 只能有清单**，所有诊断输出必须走 `diag()`（在 `--once` 时落到 stderr）。
+8. **服务端不得被拖垮。** 模组里的同步逻辑必须 `catch Throwable` 并只打日志；端口被占用、配置写坏都不能影响 Minecraft 服务器。
+9. **同步失败默认放行游戏启动**（只告警），`--strict` 才中止；版本不匹配的默认策略是"加载器提醒 / MC 版本跳过同步"。
+10. **改行为就要改文档**：`README.md` 的行为表、`docs/deploy.md`、`docs/protocol.md` 三处。
+
+## 代码风格
+
+- JDK 21：`record`、`switch` 表达式、`var` 都用了；不要为了兼容旧版本而降级写法。
+- 面向用户的日志、注释、文档一律中文；标识符与代码英文。
+- `javac -Xlint:all` 必须零警告（`build.sh` 已开启）。
+- 不写魔法数字到业务逻辑里；协议/端口等常量集中在各自类顶部。
+- 新增工具方法要么被用到，要么别留（评审时会被当死代码）。
+
+## 常见陷阱（踩过的）
+
+- **`@Mod.dist` 是数组且默认 `{CLIENT, DEDICATED_SERVER}`**：不写 `dist` = 双端；显式写两个值也是双端。别把"代码里出现 `DEDICATED_SERVER`"当成服务端专属（`ModEnv` 用注解解析就是为了避免这个误判）。
+- **glob 转成正则时必须转义**：`SyncServer.globPattern` 用 `Pattern.quote`，新增匹配逻辑要保持。
+- **`state.json` 的 `mtime` 快速路径**：目标文件大小 + 已记录 sha + mtime 都对上才跳过哈希；改动重组逻辑时别把这条捷径弄丢，否则每次启动都会全量哈希。
+- **`trash/` 只保留最近 `TRASH_KEEP` 批**，且内容未变的文件要原地保留（否则每次重组都产生垃圾）。
+- **网络环境可能很慢/有代理**：Modrinth 查询的连接超时已放宽到 15 秒且失败只告警一次；Forge/NeoForge 官方安装器把超时硬编码成 5 秒（`sipush 5000`），在网络慢的环境必然失败——`docs/deploy.md` 的排查表里有记录，`build-mod.sh` 不用 Gradle 也是为了绕开它。
+- **测试可移植性**：不要用 `stat -f`（BSD）或 `find -quit`；用测试里的 `file_mtime` / `file_size` / `has_file` 助手。
+
+## 提交约定
+
+- 一个改动一个主题；提交信息写清"为什么"，而不只是"改了什么"。
+- 推之前跑 `bash test/run-all.sh`；涉及服务端过滤/版本比对的改动，对应套件必须新增断言而不是"手动验过"。
+- 不要把 `build/` 提交进仓库（已在 `.gitignore`）；要发布二进制走 GitHub Release。

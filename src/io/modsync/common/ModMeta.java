@@ -1,0 +1,131 @@
+package io.modsync.common;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Map;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+/** Hashing plus best-effort mod-id extraction from a mod jar. */
+public final class ModMeta {
+
+    private ModMeta() {
+    }
+
+    public static String sha256(Path file) throws IOException {
+        return digest("SHA-256", file);
+    }
+
+    public static String sha1(Path file) throws IOException {
+        return digest("SHA-1", file);
+    }
+
+    private static String digest(String algorithm, Path file) throws IOException {
+        MessageDigest md;
+        try {
+            md = MessageDigest.getInstance(algorithm);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+        byte[] buf = new byte[1 << 16];
+        try (InputStream in = Files.newInputStream(file)) {
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                md.update(buf, 0, n);
+            }
+        }
+        return hex(md.digest());
+    }
+
+    public static String hex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Reads the mod id from NeoForge ({@code META-INF/neoforge.mods.toml}), Forge
+     * ({@code META-INF/mods.toml}) or Fabric ({@code fabric.mod.json}) metadata.
+     *
+     * @return the mod id, or {@code null} when it cannot be determined
+     */
+    public static String readModId(Path jar) {
+        try (ZipFile zip = new ZipFile(jar.toFile())) {
+            String toml = readEntry(zip, "META-INF/neoforge.mods.toml");
+            if (toml == null) {
+                toml = readEntry(zip, "META-INF/mods.toml");
+            }
+            if (toml != null) {
+                String id = firstTomlModId(toml);
+                if (id != null) {
+                    return id;
+                }
+            }
+            String fabric = readEntry(zip, "fabric.mod.json");
+            if (fabric != null) {
+                String id = firstJsonId(fabric);
+                if (id != null) {
+                    return id;
+                }
+            }
+            return null;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static String readEntry(ZipFile zip, String name) throws IOException {
+        ZipEntry entry = zip.getEntry(name);
+        if (entry == null) {
+            return null;
+        }
+        try (InputStream in = zip.getInputStream(entry)) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    /** Handles both {@code modId="x"} and {@code modId = 'x'} forms, ignoring comments. */
+    static String firstTomlModId(String toml) {
+        for (String rawLine : toml.split("\r?\n")) {
+            String line = rawLine;
+            int hash = line.indexOf('#');
+            if (hash >= 0) {
+                line = line.substring(0, hash);
+            }
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("modId")) {
+                continue;
+            }
+            int eq = trimmed.indexOf('=');
+            if (eq < 0) {
+                continue;
+            }
+            String value = trimmed.substring(eq + 1).trim();
+            if (value.length() >= 2) {
+                char q = value.charAt(0);
+                if ((q == '"' || q == '\'') && value.charAt(value.length() - 1) == q) {
+                    return value.substring(1, value.length() - 1);
+                }
+            }
+        }
+        return null;
+    }
+
+    static String firstJsonId(String json) {
+        try {
+            Map<String, Object> obj = Json.asObject(Json.parse(json));
+            return obj == null ? null : Json.str(obj, "id", null);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+}

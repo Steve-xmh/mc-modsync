@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 运行测试套件
+        run: bash test/run-all.sh
+
+      # 可选：设置 MODSYNC_TEST_ONLINE=1 会额外跑一条需要外网的 Modrinth 直链回填用例。
+      # 默认关闭，避免外部服务抖动把 CI 判红。
