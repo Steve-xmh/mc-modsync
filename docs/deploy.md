@@ -162,7 +162,29 @@ java -jar modsync-server.jar --mods ./mods --extra ./modsync/extra \
 - `$INST_JAVA` / `$INST_MC_DIR` 由 Prism 替换，路径含空格也没问题。
 - 同步进度窗口与确认弹窗由 agent 自动显示（无显示环境自动退回控制台），没有关闭开关。
 
-### 2.2 PCL2（Plain Craft Launcher 2）
+### 2.2 PCL2 / PCL2 CE
+
+**推荐：用启动器的「启动前执行命令」，不要用 `-javaagent`。**
+
+版本设置 → 高级 → **启动前执行命令**（设置键 `VersionAdvanceRun`）：
+
+```
+"<启动器用的那个 java.exe>" -jar "<绝对路径>\modsync-agent.jar" --game-dir "<实例目录>"
+```
+
+必须同时把等待开关打开（界面上这个勾选项是隐藏的，只能写配置文件）：
+
+| 作用范围 | 配置文件 | 要写的键 |
+| --- | --- | --- |
+| 单实例 | `<实例目录>\PCL\config.v1.yml` | `VersionAdvanceRun` + `VersionAdvanceRunWait: true` |
+| 全局 | PCL 安装目录的 `config.v1.yml` | `LaunchAdvanceRun` + `LaunchAdvanceRunWait: true` |
+
+原因：PCL 的这两条自定义命令在 `McLaunchRun`（启动游戏进程）**之前**执行（源码 `Modules/Minecraft/ModLaunch.vb` 的
+`McLaunchCustom`），比 `premain` 还早且不改 JVM 参数；不设 `...RunWait: true` 时 PCL 不等命令结束就启动游戏，会和同步抢时间。
+PCL 执行命令的工作目录是 `.minecraft` 根目录，版本隔离时 `mods/` 在实例目录里，所以 `--game-dir` 必须显式写实例目录。
+
+<details>
+<summary>没有「启动前执行命令」的启动器再用 -javaagent</summary>
 
 版本设置 → 高级 → **JVM 参数**，追加：
 
@@ -172,6 +194,8 @@ java -jar modsync-server.jar --mods ./mods --extra ./modsync/extra \
 
 `-javaagent` 的 `premain` 在 Minecraft 主类之前执行，模组在加载前就已就位。
 若启动器的工作目录不是 `.minecraft`，再加一个系统属性：`-Dmodsync.gameDir=/绝对路径/.minecraft`。
+
+</details>
 
 ### 2.3 手动 / 其他启动器
 

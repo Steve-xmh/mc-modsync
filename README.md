@@ -7,7 +7,7 @@
 
 针对现有方案（AutoModpack 等）的差异点：
 
-- **真正的启动前同步**：同步发生在 Minecraft 主类加载之前（`-javaagent` 或 Prism 预启动命令），不存在「进服务器才下载、下载完还得重启」的循环。
+- **真正的启动前同步**：同步发生在 Minecraft 主类加载之前（Prism/MultiMC 的预启动命令、PCL 的「启动前执行命令」，或退一步用 `-javaagent`），不存在「进服务器才下载、下载完还得重启」的循环。
 - **玩家自装模组是一等公民**：你自己的模组直接放在 `mods/` 里，只要 mod id 不与服务器冲突就**永不被 agent 触碰**；冲突时服务器版本优先，你那份移入 `modsync/archive/`，随时可以手动放回。
 - **服务端只需要装一个模组**：模组启动时直接读取 FML **实际加载**的模组文件作为发布源（`publishLoadedMods`），完全不依赖目录布局；端口、排除规则等都在 `config/modsync-server.json` 里改。
 - **自动过滤纯服务端模组**：性能/管理类的服务端专属模组不会推给玩家（识别 Fabric `environment: server`、NeoForge `@Mod(dist=DEDICATED_SERVER)`——真解析 class 注解，不会把「代码里引用了 Dist 的双端模组」误判）。
@@ -142,7 +142,29 @@ java -jar modsync-server.jar \
 Prism 会在启动游戏前运行这条命令；成功（退出码 0）才继续启动。进度窗口与确认弹窗由 agent 自己显示（无显示环境自动退回控制台），没有关闭开关。
 `$INST_JAVA` / `$INST_MC_DIR` 由 Prism 自动替换。
 
-#### PCL2（Plain Craft Launcher）
+#### PCL2 / PCL2 CE（推荐：用启动器的「启动前执行命令」，不用碰 JVM 参数）
+
+版本设置 → 高级 → **启动前执行命令**（设置键 `VersionAdvanceRun`；全局设置里对应 `LaunchAdvanceRun`）：
+
+```
+"<启动器用的那个 java.exe>" -jar "<绝对路径>\modsync-agent.jar" --game-dir "<实例目录>"
+```
+
+**同时要把等待开关打开**——这个勾选项在 PCL 界面里是隐藏的，只能写进配置文件：
+
+| 作用范围 | 配置文件 | 要写的键 |
+| --- | --- | --- |
+| 单个实例 | `<实例目录>\PCL\config.v1.yml` | `VersionAdvanceRun: '<命令>'` 和 `VersionAdvanceRunWait: true` |
+| 所有实例 | PCL 安装目录下的 `config.v1.yml` | `LaunchAdvanceRun: '<命令>'` 和 `LaunchAdvanceRunWait: true` |
+
+不写 `...RunWait: true` 的话 PCL **不会等命令跑完**就启动游戏，同步会和游戏抢时间。
+
+为什么这比 `-javaagent` 好：PCL 的这两条自定义命令是在 `McLaunchRun`（真正启动游戏进程）**之前**执行的
+（见 PCL2 源码 `Modules/Minecraft/ModLaunch.vb` 的 `McLaunchCustom`），所以同步比 `premain` 还早，而且完全不用改 JVM 参数。
+注意 PCL 执行命令时的工作目录是 `.minecraft` 根目录，而版本隔离时 `mods/` 在实例目录里，所以 `--game-dir` 必须显式写实例目录。
+
+<details>
+<summary>如果你的启动器没有「启动前执行命令」，再用 -javaagent（点击展开）</summary>
 
 1. 把 `modsync-agent.jar` 放到实例的 `.minecraft/modsync/` 下（放这里没有空格，路径最省事）；
 2. 版本设置 → 高级 → **JVM 参数**，追加：
@@ -159,6 +181,8 @@ Prism 会在启动游戏前运行这条命令；成功（退出码 0）才继续
 ```
 
 `-javaagent` 的 `premain` 在 Minecraft 主类之前执行，所以模组在加载前就已经就位；同步失败默认只告警并继续启动（想改成失败即中止：`--strict` 或配置里 `"strict": true`）。
+
+</details>
 
 #### 手动 / 其他启动器
 
@@ -223,6 +247,13 @@ jar-in-jar 内嵌件不会被当成独立文件发布、`FMLModType: LIBRARY` �
 - **版本比对是"提醒"而非"自动升级"**：agent 只能读取本地实例的加载器版本并给出升级路径，不会替你改启动器配置（改启动器文件风险太高）。
 - **单服务器**：一个实例只对应一个服务端；多服务器切换未实现（会给 `mods-server/` 换整套账本）。
 - **GUI 只在 Windows/macOS/Linux 桌面 JVM 上可用**，headless 环境自动退回控制台进度条。
+- **为什么一定要有个「启动前」的钩子（而不是把 jar 丢进 `mods/` 就完事）**：FML 是在启动时**一次性**扫描 `mods/` 建出模组列表的，
+  之后不会再接受新文件——所以任何「住在 `mods/` 里的同步模组」都只能做到「先把模组下下来，再让你重启一次游戏才生效」，
+  这正是 AutoModpack 那类方案的体验，也是本项目要用启动前钩子（Prism 的预启动命令 / PCL 的启动前执行命令 / `-javaagent`）绕开的东西。
+  官方加载器也没留后门：`IModFileCandidateLocator` / `IModFileReader` / `IDependencyLocator` 这类扩展点是
+  `LaunchContext.loadServices()` → `ServiceLoader.load(ModuleLayer, …)` 从 **JPMS 模块层**（也就是启动器的 `-p`）里捞的，
+  想让一个外部 jar 生效仍然要动启动参数，并不比 `-javaagent` 更「零配置」。
+  想要「零配置、丢进 `mods/` 就能用」就只剩「同步完提示/自动重启一次」这一条路。
 - 只管理 `mods/*.jar`；配置、资源包、光影等其它路径的同步在做清单 v2 时再扩。
 - 服务端模组判定是「宁可多发、不可漏发」：判定不出侧向时一律发布，靠 `excludes` / `forcePublish` 兜底。
 
