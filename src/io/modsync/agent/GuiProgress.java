@@ -22,7 +22,11 @@ import java.io.PrintStream;
  */
 final class GuiProgress extends Progress {
 
-    private JFrame frame;
+    /**
+     * Not volatile-by-accident: {@link #build(String)} runs on the AWT thread while the sync thread may
+     * call {@link #closeUi()} at any moment (a fast sync can finish before the window even exists).
+     */
+    private volatile JFrame frame;
     private JProgressBar bar;
     private JLabel phaseLabel;
     private JLabel detailLabel;
@@ -37,10 +41,13 @@ final class GuiProgress extends Progress {
     }
 
     private void build(String title) {
+        // 本方法在 AWT 线程上执行，而同步线程随时可能调用 closeUi()（同步很快时窗口还没建好就结束了）。
+        // 所以先只用局部变量，全部成功后再发布到 frame 字段，避免 closeUi() 把字段置空后这里再 NPE。
+        JFrame built = null;
         try {
-            frame = new JFrame(title == null || title.isBlank() ? "ModSync" : title);
-            frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
-            frame.setAlwaysOnTop(true);
+            built = new JFrame(title == null || title.isBlank() ? "ModSync" : title);
+            built.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+            built.setAlwaysOnTop(true);
 
             JPanel root = new JPanel(new BorderLayout(0, 10));
             root.setBorder(BorderFactory.createEmptyBorder(16, 18, 14, 18));
@@ -56,9 +63,10 @@ final class GuiProgress extends Progress {
             labels.add(Box.createVerticalStrut(4));
             labels.add(detailLabel);
 
-            bar = new JProgressBar(0, 100);
-            bar.setStringPainted(true);
-            bar.setPreferredSize(new Dimension(420, 22));
+            JProgressBar progressBar = new JProgressBar(0, 100);
+            progressBar.setStringPainted(true);
+            progressBar.setPreferredSize(new Dimension(420, 22));
+            bar = progressBar;
 
             JButton cancel = new JButton("跳过同步");
             cancel.addActionListener(e -> {
@@ -69,7 +77,7 @@ final class GuiProgress extends Progress {
             });
 
             JPanel bottom = new JPanel(new BorderLayout());
-            bottom.add(bar, BorderLayout.CENTER);
+            bottom.add(progressBar, BorderLayout.CENTER);
             JPanel south = new JPanel();
             south.add(cancel);
             bottom.add(south, BorderLayout.EAST);
@@ -77,15 +85,22 @@ final class GuiProgress extends Progress {
             root.add(labels, BorderLayout.NORTH);
             root.add(bottom, BorderLayout.CENTER);
 
-            frame.setContentPane(root);
-            frame.pack();
-            frame.setLocationRelativeTo(null);
-            frame.setVisible(true);
+            built.setContentPane(root);
+            built.pack();
+            built.setLocationRelativeTo(null);
+            built.setVisible(true);
+            if (closed) {
+                // 同步在窗口建好之前就结束了：立刻收掉，不留下一个没人管的窗口。
+                built.setVisible(false);
+                built.dispose();
+                return;
+            }
+            frame = built;
+            uiUpdate();
         } catch (Throwable t) {
             out.println("[modsync] 无法创建进度窗口: " + t);
-            if (frame != null) {
-                frame.dispose();
-                frame = null;
+            if (built != null) {
+                built.dispose();
             }
         }
     }
