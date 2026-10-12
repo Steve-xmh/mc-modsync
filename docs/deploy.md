@@ -51,7 +51,7 @@
 改完配置重启服务器。启动日志应出现：
 
 ```
-[modsync] publishing the 27 mod jar(s) FML actually loaded (no directory scan needed)
+[modsync] publishing 27 loaded jar(s): 26 mod(s) + 1 FML library jar(s); ignored 45 jar-in-jar/loader entry(ies)
 [modsync] publishing 26 files (412.3 MB) at http://play.example.com:25590/modsync - clients sync from http://play.example.com:25590/modsync/manifest.json
 [modsync-server] skipping server-only mod (clients do not need it): Chunky-1.4.36.jar [from mod metadata]
 [modsync] announcing Minecraft 1.21.1 / NeoForge 21.1.248 so clients can be told to upgrade their loader when needed
@@ -64,7 +64,7 @@
 | 服务器加载的模组（不论放在哪个目录） | 发布 |
 | 客户端专用、服务器不加载的模组（Sodium / 光影 / 小地图…） | 默认**不发布**；放进 `modsync/extra/` 或写进 `modDirs` 才会发布 |
 | `mods/` 里存在但服务器**没有加载**的 jar（被 FML 拒绝、放错地方） | 不发布。这正是"发布已加载"的用意：推给玩家的一定是服务器真在跑的东西 |
-| FML 以 `FMLModType: LIBRARY` 加载的库（KotlinForForge 等，位于 `mods/`） | **发布**。它不是 mod（没有 `mods.toml`，不出现在 `ModList.getMods()`），但常常是客户端能不能启动的关键 |
+| `mods/` 里声明 `FMLModType: LIBRARY` 的库（KotlinForForge 等） | **发布**。它不是 mod（没有 `mods.toml`，既不在 `ModList.getMods()` 也不在 `getModFiles()` 里），发布器读 `MANIFEST.MF` 把它找出来；它常常是客户端能不能启动的关键 |
 | 加载器自身（`minecraft` / `neoforge`）、jar-in-jar 嵌套的虚拟文件 | 不发布（自动）。内嵌件只存在于父 jar 内部（FML 的 jar 文件系统路径），服务器磁盘上没有这个文件，发出去只会让客户端多出一份重复的模组 |
 | ModSync 模组自己 | 不发布（自动，改名也一样） |
 | 判定为纯服务端的模组 | 不发布（见 1.4，可用 `forcePublish` 覆盖） |
@@ -80,7 +80,7 @@ curl http://<服务器IP>:25590/modsync/manifest.json | head -40
 - **发布器永不发布自己**：模组形态在启动时反射读出自身 jar 的文件名并加进排除（**改文件名也不会漏**，日志 `not publishing our own mod jar: ...`）；独立进程形态同样按运行位置排除（日志 `not publishing our own jar: ...`）。默认 glob `modsync-neoforge-*.jar` / `modsync-server*.jar` 只是兜底。
 - 只想给客户端、服务端不加载的模组（Sodium/Iris/光影类）：放进 `modsync/extra/`，模组会自动创建这个目录。它们同样会被同步，但不会被服务端加载。注意这类模组若声明了 `displayTest="IGNORE_SERVER_VERSION"`（或 `@Mod(dist=CLIENT)`）时才允许玩家带着它进服。
 - 两端都要装的模组 = 服务器加载的那批（自动发布）；只有客户端要装的 = `modsync/extra/` 或 `modDirs`。这个划分决定玩家能否顺利进服。
-- **`FMLModType: LIBRARY` 的库会被发布**（KotlinForForge 这类「客户端离了它就起不来」的语言/库提供者）。服务端启动日志里 `ignored N loaded entry(ies) that are not real jars` 统计的就是被跳过的内嵌件与 `libraries/` 产物；若清单里出现了你不想发的库，用 `excludes` 挡掉。
+- **`FMLModType: LIBRARY` 的库会被发布**（KotlinForForge 这类「客户端离了它就起不来」的库提供者）。FML 把这类 jar 放在 classpath 上而不是 mod 列表里，所以发布器是扫描 `mods/` 目录 + 读 `MANIFEST.MF` 找出来的（这是唯一能发现它们的办法）。服务端启动日志 `publishing N loaded jar(s): M mod(s) + K FML library jar(s); ignored J jar-in-jar/loader entry(ies)` 会写清各自数量；若清单里出现了你不想发的库，用 `excludes` 挡掉。
 - **内嵌（jar-in-jar）的模组不会被单独发布**：它在服务端只是一个父 jar 内部的虚拟路径，`mods/` 里并不存在这个文件。判定基于「路径是否位于默认文件系统」，所以哪怕 FML 报告它 `isRegularFile() == true` 也不会泄漏。
 - 关掉自动识别（`"publishLoadedMods": false`）会退回「扫描目录」模式，此时 `modDirs` 为空会自动退回 `["mods"]`。
 - `--modrinth-lookup`/`modrinthLookup` 打开后，命中 Modrinth 的文件会让客户端走 CDN，省服务器上行带宽，同时作者的下载量也记上了。

@@ -36,6 +36,44 @@ public final class ModMeta {
         return name != null && name.toString().endsWith(".jar") && Files.isRegularFile(path);
     }
 
+    /**
+     * Reads the {@code FMLModType} attribute of the jar's {@code META-INF/MANIFEST.MF}.
+     *
+     * <p>FML uses this attribute to keep non-mod jars on the classpath: a jar declaring
+     * {@code LIBRARY} (KotlinForForge and friends) is loaded by the loader but never appears in
+     * {@code ModList.getMods()} <em>nor</em> {@code ModList.getModFiles()} — verified against NeoForge
+     * 21.1.248. Clients need those jars as soon as a published mod declares them as a language or
+     * library provider, so the publisher has to find them by inspecting the mods directory itself.
+     *
+     * @return the raw value (e.g. {@code LIBRARY}), or {@code null} when absent or unreadable
+     */
+    public static String fmlModType(Path jar) {
+        try (ZipFile zip = new ZipFile(jar.toFile())) {
+            String manifest = readEntry(zip, "META-INF/MANIFEST.MF");
+            if (manifest == null) {
+                return null;
+            }
+            // Manifest lines are wrapped at 72 bytes; a leading space continues the previous attribute.
+            StringBuilder unfolded = new StringBuilder(manifest.length());
+            for (String line : manifest.split("\r\n|\n|\r", -1)) {
+                if (!line.isEmpty() && (line.charAt(0) == ' ' || line.charAt(0) == '\t')) {
+                    unfolded.append(line, 1, line.length());
+                } else {
+                    unfolded.append('\n').append(line);
+                }
+            }
+            for (String line : unfolded.toString().split("\n", -1)) {
+                int colon = line.indexOf(':');
+                if (colon > 0 && line.substring(0, colon).trim().equalsIgnoreCase("FMLModType")) {
+                    return line.substring(colon + 1).trim();
+                }
+            }
+            return null;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
     public static String sha256(Path file) throws IOException {
         return digest("SHA-256", file);
     }

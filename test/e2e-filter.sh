@@ -234,6 +234,16 @@ make_neo_jar "$WORK/jij/inner/bundled-mod-1.0.jar" bundled_mod BothDefaultMod.cl
 cp "$WORK/jij/inner/bundled-mod-1.0.jar" "$WORK/jij/outer/META-INF/jarjar/bundled-mod-1.0.jar"
 (cd "$WORK/jij/outer" && jar --create --file "$MODS/parent-with-jij-1.0.jar" .)
 
+# FMLModType: LIBRARY 的库（KotlinForForge 的形态）：FML 会加载它，但它既不在
+# ModList.getMods() 也不在 getModFiles() 里，发布器只能靠读 MANIFEST 找到它。
+mkdir -p "$WORK/libstage/lib"
+printf 'not a mod\n' > "$WORK/libstage/lib/payload.txt"
+cat > "$WORK/libstage/MANIFEST.MF" <<'EOF'
+Manifest-Version: 1.0
+FMLModType: LIBRARY
+EOF
+(cd "$WORK/libstage" && jar --create --file "$MODS/neo-library-1.0.jar" --manifest MANIFEST.MF .)
+
 mkdir -p "$WORK/probe-cp"
 (cd "$WORK/probe-cp" && jar --extract --file "$SERVER_JAR")
 mkdir -p "$WORK/probe"
@@ -251,7 +261,8 @@ public final class RealJarProbe {
     public static void main(String[] args) throws Exception {
         Path parent = Path.of(args[0]);
         Path real = Path.of(args[1]);
-        Path state = Path.of(args[2]);
+        Path library = Path.of(args[2]);
+        Path state = Path.of(args[3]);
         try (FileSystem zipFs = FileSystems.newFileSystem(parent)) {
             Path nested = zipFs.getPath("/META-INF/jarjar/bundled-mod-1.0.jar");
             check(!ModMeta.isRealJar(nested), "zip 文件系统里的嵌套 jar 必须被判为非真实文件");
@@ -267,6 +278,9 @@ public final class RealJarProbe {
             check(actual.fileCount() == 1, "真实 jar 应被发布，实际 " + actual.fileCount());
             check(actual.manifestJson().contains(real.getFileName().toString()), "真实 jar 应出现在清单里");
         }
+
+        check("LIBRARY".equalsIgnoreCase(ModMeta.fmlModType(library)), "FMLModType: LIBRARY 必须被识别");
+        check(ModMeta.fmlModType(real) == null, "普通模组 jar 不应有 FMLModType");
         System.out.println("probe-ok");
     }
 
@@ -285,8 +299,10 @@ public final class RealJarProbe {
 JAVA
 if javac -encoding UTF-8 -cp "$WORK/probe-cp" -d "$WORK/probe-cp" "$WORK/probe/RealJarProbe.java" >"$WORK/probe-javac.log" 2>&1; then
   if java -cp "$WORK/probe-cp" RealJarProbe "$MODS/parent-with-jij-1.0.jar" \
-        "$MODS/neo-bothdefault-1.0.jar" "$WORK/probe-state.json" >"$WORK/probe.log" 2>&1; then
+        "$MODS/neo-bothdefault-1.0.jar" "$MODS/neo-library-1.0.jar" \
+        "$WORK/probe-state.json" >"$WORK/probe.log" 2>&1; then
     pass "虚拟路径被判为非文件且不发布；同一判定下真实 jar 照常发布"
+    pass "FMLModType 读取正确（LIBRARY 被识别、普通模组为 null）"
   else
     fail "探针断言失败: $(cat "$WORK/probe.log")"
   fi
@@ -295,17 +311,6 @@ else
 fi
 
 say "T8 FML LIBRARY 形态的 jar（没有 mods.toml）也必须发布"
-# 真实案例：kotlinforforge 的 MANIFEST.MF 只有 FMLModType: LIBRARY，
-# 它不出现在 ModList.getMods() 里，所以「只发已加载的 mod」的实现永远发不出去，
-# 而客户端会因为它缺失直接拒绝启动（sliceanddice 需要这个语言提供者）。
-mkdir -p "$WORK/libstage/lib"
-printf 'not a mod\n' > "$WORK/libstage/lib/payload.txt"
-cat > "$WORK/libstage/MANIFEST.MF" <<'EOF'
-Manifest-Version: 1.0
-FMLModType: LIBRARY
-EOF
-(cd "$WORK/libstage" && jar --create --file "$MODS/neo-library-1.0.jar" --manifest MANIFEST.MF .)
-
 gen "$WORK/m8.json"
 LIST8="$(published "$WORK/m8.json")"
 if echo "$LIST8" | grep -qx "neo-library-1.0.jar"; then
