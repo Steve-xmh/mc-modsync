@@ -20,7 +20,7 @@ ModSync：给 Minecraft **NeoForge 1.21.1** 服务器用的模组同步方案。
 | `src/io/modsync/neoforge/` | `ModSyncMod`：把 `SyncServer` 挂到 NeoForge 生命周期的外壳（`mods/` 里一个 jar 即可） |
 | `build.sh` | 编译 agent + 独立服务端 jar（javac + jar，**不需要 Gradle**） |
 | `build-mod.sh` | 编译 NeoForge 模组（对着本地已有的 NeoForge 依赖编译） |
-| `test/` | 5 套端到端测试 + `run-all.sh` |
+| `test/` | 6 套端到端测试 + `run-all.sh` |
 | `docs/protocol.md` | manifest / HTTP 协议规范（v1） |
 | `docs/deploy.md` | 真实服务器部署手册（含排查表与踩坑记录） |
 
@@ -39,7 +39,7 @@ ModSync：给 Minecraft **NeoForge 1.21.1** 服务器用的模组同步方案。
 ## 测试
 
 ```bash
-bash test/run-all.sh                 # 5 套：agent / 版本比对 / 服务端模组过滤 / 全栈
+bash test/run-all.sh                 # 6 套：agent / 版本比对 / 服务端模组过滤 / 对账 / 全栈
 MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Modrinth 直链用例
 bash test/e2e-filter.sh              # 也可以单独跑任意一套
 ```

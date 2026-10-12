@@ -22,7 +22,7 @@ assert_not_contains() { if grep -qF -- "$2" "$1"; then fail "$3: 不应出现 '$
 count_jars() { ls -1 "$1"/*.jar 2>/dev/null | wc -l | tr -d ' '; }
 say() { echo; echo "== $*"; }
 
-[ -f "$AGENT_JAR" ] || { echo "缺少 $AGENT_JAR，请先 ./build.sh" >&2; exit 1; }
+[ -f "$AGENT_JAR" ] || { echo "缺少 ${AGENT_JAR}，请先 ./build.sh" >&2; exit 1; }
 
 WS="$(mktemp -d /tmp/modsync-ver.XXXXXX)"
 SRC="$WS/mods"

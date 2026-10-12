@@ -18,11 +18,10 @@ public final class AgentConfig {
 
     public String manifestUrl = "";
     public String serverDirName = "mods-server";
-    public String clientDirName = "mods-client";
     public String targetDirName = "mods";
     public boolean strict = false;
-    public boolean autoMigrateUnknownMods = true;
-    public boolean forceRebuild = false;
+    /** 忽略清单 generatedAt 顺序护栏（`--force-sync`）。 */
+    public boolean forceSync = false;
     public boolean dryRun = false;
     public boolean verbose = false;
     public int timeoutSeconds = 30;
@@ -56,11 +55,9 @@ public final class AgentConfig {
                 Map<String, Object> root = Json.object(Json.parse(Files.readString(file, StandardCharsets.UTF_8)), "config");
                 cfg.manifestUrl = Json.str(root, "manifestUrl", cfg.manifestUrl);
                 cfg.serverDirName = Json.str(root, "serverDir", cfg.serverDirName);
-                cfg.clientDirName = Json.str(root, "clientDir", cfg.clientDirName);
                 cfg.targetDirName = Json.str(root, "targetDir", cfg.targetDirName);
                 cfg.strict = Json.bool(root, "strict", cfg.strict);
-                cfg.autoMigrateUnknownMods = Json.bool(root, "autoMigrateUnknownMods", cfg.autoMigrateUnknownMods);
-                cfg.forceRebuild = Json.bool(root, "forceRebuild", cfg.forceRebuild);
+                cfg.forceSync = Json.bool(root, "forceSync", cfg.forceSync);
                 cfg.timeoutSeconds = (int) Json.num(root, "timeoutSeconds", cfg.timeoutSeconds);
                 cfg.parallelDownloads = (int) Json.num(root, "parallelDownloads", cfg.parallelDownloads);
                 cfg.clientMinecraftVersion = Json.str(root, "clientMinecraftVersion", cfg.clientMinecraftVersion);
@@ -84,8 +81,8 @@ public final class AgentConfig {
         if (args.has("strict")) {
             cfg.strict = args.flag("strict");
         }
-        if (args.has("force") || args.has("force-rebuild")) {
-            cfg.forceRebuild = true;
+        if (args.has("force-sync")) {
+            cfg.forceSync = true;
         }
         if (args.has("dry-run")) {
             cfg.dryRun = true;
@@ -103,9 +100,6 @@ public final class AgentConfig {
         }
         if (args.has("server-dir")) {
             cfg.serverDirName = args.get("server-dir");
-        }
-        if (args.has("client-dir")) {
-            cfg.clientDirName = args.get("client-dir");
         }
         if (args.has("client-mc-version")) {
             cfg.clientMinecraftVersion = args.get("client-mc-version");
@@ -151,11 +145,9 @@ public final class AgentConfig {
         Map<String, Object> root = Json.map();
         root.put("manifestUrl", manifestUrl);
         root.put("serverDir", serverDirName);
-        root.put("clientDir", clientDirName);
         root.put("targetDir", targetDirName);
         root.put("strict", strict);
-        root.put("autoMigrateUnknownMods", autoMigrateUnknownMods);
-        root.put("forceRebuild", forceRebuild);
+        root.put("forceSync", forceSync);
         root.put("timeoutSeconds", (long) timeoutSeconds);
         root.put("parallelDownloads", (long) parallelDownloads);
         root.put("clientMinecraftVersion", clientMinecraftVersion);

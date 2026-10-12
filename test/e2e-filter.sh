@@ -18,7 +18,7 @@ pass() { PASS=$((PASS + 1)); echo "  ok   - $*"; }
 fail() { FAILED=$((FAILED + 1)); echo "  FAIL - $*"; }
 say() { echo; echo "== $*"; }
 
-[ -f "$SERVER_JAR" ] || { echo "缺少 $SERVER_JAR，请先 ./build.sh" >&2; exit 1; }
+[ -f "$SERVER_JAR" ] || { echo "缺少 ${SERVER_JAR}，请先 ./build.sh" >&2; exit 1; }
 
 say "生成测试模组（含 @Mod(dist=...) 的各种形态）"
 SRC="$WORK/src"

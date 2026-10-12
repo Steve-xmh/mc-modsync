@@ -33,6 +33,8 @@ public final class Manifest {
 
     /** sha256 of the raw response body, used for logging and the local state file. */
     public String rawHash = "";
+    /** 清单原文，成功应用后原样写进 {@code modsync/last-manifest.json} 与 history。 */
+    public String rawBody = "";
     /** ETag from the server (may be empty). */
     public String etag = "";
 
@@ -84,6 +86,7 @@ public final class Manifest {
         String body = new String(resp.body(), StandardCharsets.UTF_8);
         Manifest m = parse(body);
         m.rawHash = ModMeta.hex(sha256Bytes(resp.body()));
+        m.rawBody = body;
         m.etag = resp.headers().firstValue("ETag").orElse("");
         m.sourceUrl = manifestUrl;
         return m;

@@ -44,7 +44,7 @@ fi
 has_file() { [ -n "$(find "$1" -name "$2" -print 2>/dev/null | head -1)" ]; }
 
 if [ ! -f "$AGENT_JAR" ]; then
-  echo "找不到 $AGENT_JAR，请先运行 ./build.sh" >&2
+  echo "找不到 ${AGENT_JAR}，请先运行 ./build.sh" >&2
   exit 1
 fi
 
@@ -62,7 +62,12 @@ cleanup() {
 trap cleanup EXIT
 
 make_mod() { bash "$ROOT/test/make-mod.sh" "$@" >/dev/null; }
-regen() { python3 "$ROOT/test/gen-manifest.py" --mods "$SRC" --out "$WWW" --base-url "$BASE" "$@" >/dev/null; }
+regens=0
+regen() {
+  regens=$((regens + 1))
+  python3 "$ROOT/test/gen-manifest.py" --mods "$SRC" --out "$WWW" --base-url "$BASE" \
+    --generated-at "$(printf '2026-10-08T00:00:%02d.%03dZ' "$((regens % 60))" "$regens")" "$@" >/dev/null
+}
 
 run_agent() {
   local log="$1"
@@ -92,51 +97,56 @@ if ! curl -sf "$BASE/manifest.json" -o /dev/null; then
 fi
 
 # ---------------------------------------------------------------- T1 首次同步
-say "T1 首次同步：把服务器模组下载到 mods-server 并重组 mods"
+say "T1 首次同步：服务器模组进账本并部署到 mods/"
 run_agent "$WS/t1.log"
 assert_eq "0" "$?" "agent 退出码为 0"
 assert_contains "$WS/t1.log" "下载 2" "下载了 2 个文件"
 assert_eq "2" "$(count_jars "$SANDBOX/mods-server")" "mods-server 有 2 个 jar"
-assert_eq "2" "$(count_jars "$SANDBOX/mods")" "mods 重组后有 2 个 jar"
+assert_eq "2" "$(count_jars "$SANDBOX/mods")" "mods/ 里有 2 个服务器模组"
 assert_same_content "$SANDBOX/mods/create-1.0.jar" "$SANDBOX/mods-server/create-1.0.jar" "mods 是 mods-server 的拷贝"
 
 MTIME_BEFORE="$(file_mtime "$SANDBOX/mods-server/create-1.0.jar")"
 
 # ---------------------------------------------------------------- T2 幂等
-say "T2 再次运行：符合的文件不重写、不重组"
+say "T2 再次运行：符合的文件不重写（稳态）"
 run_agent "$WS/t2.log"
 assert_eq "0" "$?" "agent 退出码为 0"
 assert_contains "$WS/t2.log" "已符合 2 个" "识别出 2 个文件已符合"
-assert_contains "$WS/t2.log" "无需重组" "跳过重组"
+assert_contains "$WS/t2.log" "完成: 校验 2，下载 0，移除 0，归档 0，补齐 0" "稳态下不做任何改动"
 assert_eq "$MTIME_BEFORE" "$(file_mtime "$SANDBOX/mods-server/create-1.0.jar")" "已符合文件未被重写（mtime 不变）"
 
 # ---------------------------------------------------------------- T3 client 模组共存
-say "T3 玩家自装模组（mods-client）参与重组"
-make_mod "$SANDBOX/mods-client/extra-1.0.jar" extra "payload-extra"
+say "T3 玩家自装模组：直接放在 mods/ 里，永不被触碰"
+make_mod "$SANDBOX/mods/extra-1.0.jar" extra "payload-extra"
+EXTRA_MTIME="$(file_mtime "$SANDBOX/mods/extra-1.0.jar")"
 run_agent "$WS/t3.log"
-assert_eq "3" "$(count_jars "$SANDBOX/mods")" "mods 变成 3 个 jar"
-assert_file_exists "$SANDBOX/mods/extra-1.0.jar" "自装模组被部署到 mods"
+assert_eq "3" "$(count_jars "$SANDBOX/mods")" "mods/ 变成 3 个 jar（2 服务器 + 1 玩家）"
+assert_eq "$EXTRA_MTIME" "$(file_mtime "$SANDBOX/mods/extra-1.0.jar")" "玩家模组文件未被触碰"
 if has_file "$SANDBOX/modsync/trash" 'create-1.0.jar*'; then
-  fail "内容未变的服务器模组不应进入 trash（重组应原地保留）"
+  fail "内容未变的服务器模组不应进入 trash"
 else
   pass "内容未变的模组原地保留，不产生 trash 垃圾"
 fi
 
 # ---------------------------------------------------------------- T4 同 mod id 冲突
-say "T4 同 mod id 冲突：以服务器版本为准"
-make_mod "$SANDBOX/mods-client/create-mine-1.0.jar" create "payload-client-create"
+say "T4 同 mod id 冲突：服务器版本优先，玩家那份进 archive"
+make_mod "$SANDBOX/mods/create-mine-1.0.jar" create "payload-client-create"
 run_agent "$WS/t4.log"
-assert_eq "3" "$(count_jars "$SANDBOX/mods")" "mods 仍为 3 个（冲突项被跳过）"
-assert_contains "$WS/t4.log" "以服务器版本为准" "日志说明冲突处理策略"
+assert_file_absent "$SANDBOX/mods/create-mine-1.0.jar" "冲突的玩家版本被移出 mods/"
+assert_file_exists "$SANDBOX/modsync/archive/create-mine-1.0.jar" "玩家版本进了 modsync/archive（可恢复）"
+assert_contains "$WS/t4.log" "归档玩家模组" "日志说明是归档而不是删除"
+assert_eq "3" "$(count_jars "$SANDBOX/mods")" "mods/ 仍是 3 个 jar"
 assert_same_content "$SANDBOX/mods/create-1.0.jar" "$SANDBOX/mods-server/create-1.0.jar" "mods 中保留的是服务器版本"
 
 # ---------------------------------------------------------------- T5 误放进 mods 的模组
-say "T5 玩家把模组直接丢进 mods/：迁移到 mods-client 而非删除"
+say "T5 玩家把模组直接丢进 mods/：视为玩家模组，原样保留、不迁移"
 make_mod "$SANDBOX/mods/manual-1.0.jar" manual "payload-manual"
+MANUAL_MTIME="$(file_mtime "$SANDBOX/mods/manual-1.0.jar")"
 run_agent "$WS/t5.log"
-assert_contains "$WS/t5.log" "迁移玩家自装模组" "日志记录迁移动作"
-assert_file_exists "$SANDBOX/mods-client/manual-1.0.jar" "文件被迁移到 mods-client"
-assert_eq "4" "$(count_jars "$SANDBOX/mods")" "迁移后 mods 为 4 个 jar"
+assert_file_exists "$SANDBOX/mods/manual-1.0.jar" "文件仍在 mods/"
+assert_eq "$MANUAL_MTIME" "$(file_mtime "$SANDBOX/mods/manual-1.0.jar")" "文件未被触碰"
+assert_file_absent "$SANDBOX/mods-client" "不再有 mods-client 目录"
+assert_eq "4" "$(count_jars "$SANDBOX/mods")" "mods/ 为 4 个 jar"
 
 # ---------------------------------------------------------------- T6 服务器更新
 say "T6 服务器模组更新：只下载变化的那一个"
@@ -147,23 +157,30 @@ assert_contains "$WS/t6.log" "下载 1" "只下载 1 个变化文件"
 assert_same_content "$SANDBOX/mods/create-1.0.jar" "$SANDBOX/mods-server/create-1.0.jar" "mods 同步到新版本"
 
 # ---------------------------------------------------------------- T7 服务器删除
-say "T7 服务器删除模组：本地移入 trash 并重组"
+say "T7 服务器删除模组：账本与 mods/ 同步移除，旧版进 trash"
 rm -f "$SRC/sodium-1.0.jar"
 regen
 run_agent "$WS/t7.log"
+assert_contains "$WS/t7.log" "服务器已删除" "日志说明是服务器删除"
+assert_file_absent "$SANDBOX/mods/sodium-1.0.jar" "mods/ 中已移除"
 assert_file_absent "$SANDBOX/mods-server/sodium-1.0.jar" "mods-server 中已移除"
 if has_file "$SANDBOX/modsync/trash" 'sodium-1.0.jar*'; then
   pass "被移除的文件进入 modsync/trash"
 else
   fail "trash 中找不到被移除的 sodium-1.0.jar"
 fi
-assert_eq "3" "$(count_jars "$SANDBOX/mods")" "重组后 mods 为 3 个 jar"
+assert_eq "3" "$(count_jars "$SANDBOX/mods")" "删除后 mods/ 为 3 个 jar"
 
 # ---------------------------------------------------------------- T8 dry-run
-say "T8 --force --dry-run 只报告不改动"
-run_agent "$WS/t8.log" --force --dry-run
+say "T8 --dry-run 只报告不改动"
+make_mod "$SRC/pending-1.0.jar" pending "payload-pending"
+regen
+run_agent "$WS/t8.log" --dry-run
 assert_contains "$WS/t8.log" "[dry-run]" "输出 dry-run 计划"
+assert_file_absent "$SANDBOX/mods/pending-1.0.jar" "dry-run 不写 mods/"
+assert_file_absent "$SANDBOX/mods-server/pending-1.0.jar" "dry-run 不写账本"
 assert_eq "3" "$(count_jars "$SANDBOX/mods")" "mods 未被改动"
+rm -f "$SRC/pending-1.0.jar"
 
 # ---------------------------------------------------------------- T9 url 直链
 say "T9 清单提供 url 直链时走直链下载"

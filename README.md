@@ -55,14 +55,14 @@
 # build/modsync-server.jar   服务端（独立进程）
 # build/modsync-agent.jar    客户端（同时是 -javaagent 和可执行 jar）
 ./build-mod.sh                # 可选：NeoForge 服务端模组（对着本地 NeoForge 依赖编译，不需要 Gradle）
-# build/modsync-neoforge-1.1.0.jar
+# build/modsync-neoforge-1.2.0.jar
 ```
 
 ### 2. 服务端
 
 #### 方式 A：NeoForge 模组（推荐：装完就完事）
 
-把 `modsync-neoforge-1.1.0.jar` 丢进服务器 `mods/`，重启服务器即可 —— 不用起第二个进程，也不用登记任何目录。
+把 `modsync-neoforge-1.2.0.jar` 丢进服务器 `mods/`，重启服务器即可 —— 不用起第二个进程，也不用登记任何目录。
 模组启动时会问 FML **这台服务器实际加载了哪些模组文件**，直接把那些 jar 当作发布源：
 
 ```jsonc
@@ -190,12 +190,13 @@ java -jar modsync-agent.jar --game-dir /path/to/.minecraft --manifest-url http:/
 
 ```bash
 bash test/run-all.sh
-# agent 场景 33 项 + 版本比对 19 项 + 发布范围/过滤 21 项 + 全栈（真服务端 + 真 agent）23 项 = 96 项
+# agent 43 + 版本比对 19 + 发布范围/过滤 21 + 对账 48 + 全栈（真服务端 + 真 agent）23 = 154 项
 
 MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Modrinth 直链回填用例
 ```
 
-覆盖：首次同步、幂等不重写、`--dry-run`、玩家自装模组永不被触碰、同 id 冲突进归档、删除客户端模组不再复活、
+覆盖：首次同步（无账本只增不删）、幂等不重写（mtime 不变）、`--dry-run`、玩家自装模组永不被触碰、同 id 冲突进归档、
+**玩家删掉客户端模组不再复活**、玩家删服务器模组被补回、服务器增删改、改名不重复下载、时间戳护栏、空/坏清单完全不动、
 服务器增删改的增量下载、本地篡改（同大小不同内容）检测、ETag/304、404/400、`-javaagent` 入口、
 `--once` 清单结构、`--exclude` 与 `--extra`、加载器/MC 版本比对（含 Prism `mmc-pack.json` 自动探测）、
 纯服务端模组过滤（Fabric 环境字段、NeoForge `dist` 注解的四种形态、`force-publish` 覆盖）、

@@ -40,6 +40,13 @@ public final class Json {
         return sb.toString();
     }
 
+    /** 单行紧凑输出（JSONL 审计日志用）：对象与数组不换行、不加缩进。 */
+    public static String writeCompact(Object value) {
+        StringBuilder sb = new StringBuilder();
+        writeCompactValue(sb, value);
+        return sb.toString();
+    }
+
     // ---------------------------------------------------------------- helpers
 
     @SuppressWarnings("unchecked")
@@ -330,6 +337,48 @@ public final class Json {
         for (int i = 0; i < indent; i++) {
             sb.append("  ");
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void writeCompactValue(StringBuilder sb, Object v) {
+        if (v == null) {
+            sb.append("null");
+        } else if (v instanceof String) {
+            quote(sb, (String) v);
+        } else if (v instanceof Boolean || v instanceof Number) {
+            sb.append(v);
+        } else if (v instanceof Map) {
+            writeCompactObject(sb, (Map<String, Object>) v);
+        } else if (v instanceof List) {
+            writeCompactArray(sb, (List<Object>) v);
+        } else {
+            quote(sb, String.valueOf(v));
+        }
+    }
+
+    private static void writeCompactObject(StringBuilder sb, Map<String, Object> map) {
+        sb.append('{');
+        int i = 0;
+        for (Map.Entry<String, Object> e : map.entrySet()) {
+            if (i++ > 0) {
+                sb.append(',');
+            }
+            quote(sb, e.getKey());
+            sb.append(':');
+            writeCompactValue(sb, e.getValue());
+        }
+        sb.append('}');
+    }
+
+    private static void writeCompactArray(StringBuilder sb, List<Object> list) {
+        sb.append('[');
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            writeCompactValue(sb, list.get(i));
+        }
+        sb.append(']');
     }
 
     private static void quote(StringBuilder sb, String s) {

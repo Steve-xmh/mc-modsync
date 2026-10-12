@@ -34,7 +34,7 @@ fi
 has_file() { [ -n "$(find "$1" -name "$2" -print 2>/dev/null | head -1)" ]; }
 
 for jar in "$SERVER_JAR" "$AGENT_JAR"; do
-  [ -f "$jar" ] || { echo "缺少 $jar，请先运行 ./build.sh" >&2; exit 1; }
+  [ -f "$jar" ] || { echo "缺少 ${jar}，请先运行 ./build.sh" >&2; exit 1; }
 done
 
 WS="$(mktemp -d /tmp/modsync-server-e2e.XXXXXX)"
@@ -156,7 +156,7 @@ say "agent 二次同步：走 ETag 304 快速路径"
 java -jar "$AGENT_JAR" --game-dir "$GAME" --manifest-url "$MANIFEST_URL" >"$WS/a2.log" 2>&1
 assert_eq "0" "$?" "agent 退出码为 0"
 assert_contains "$WS/a2.log" "清单未变化 (HTTP 304)" "agent 命中 304 快速路径"
-assert_contains "$WS/a2.log" "无需重组" "未发生无谓重组"
+assert_contains "$WS/a2.log" "下载 0" "增量同步未重复下载"
 
 say "服务端模组更新后 agent 增量拉取"
 make_mod "$MODS/jei-1.0.jar" jei "server-jei-v2"

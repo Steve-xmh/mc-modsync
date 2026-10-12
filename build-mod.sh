@@ -14,7 +14,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$ROOT/build"
-VERSION="${MODSYNC_MOD_VERSION:-1.1.0}"
+VERSION="${MODSYNC_MOD_VERSION:-1.2.0}"
 
 NEOLIBS=""
 while [[ $# -gt 0 ]]; do

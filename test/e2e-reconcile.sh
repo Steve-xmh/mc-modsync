@@ -47,7 +47,7 @@ fi
 has_file() { [ -n "$(find "$1" -name "$2" -print 2>/dev/null | head -1)" ]; }
 
 if [ ! -f "$AGENT_JAR" ]; then
-  echo "找不到 $AGENT_JAR，请先运行 ./build.sh" >&2
+  echo "找不到 ${AGENT_JAR}，请先运行 ./build.sh" >&2
   exit 1
 fi
 
@@ -64,12 +64,17 @@ trap cleanup EXIT
 make_mod() { bash "$ROOT/test/make-mod.sh" "$@" >/dev/null; }
 # 时间戳护栏要能被测试驱动：每次发布都用一个严格递增的时间戳
 regens=0
+LAST_TS=""
 regen() {
   regens=$((regens + 1))
-  local ts
-  ts="$(printf '2026-10-08T00:00:%02d.%03dZ' "$((regens % 60))" "$regens")"
+  LAST_TS="$(printf '2026-10-08T00:00:%02d.%03dZ' "$((regens % 60))" "$regens")"
   python3 "$ROOT/test/gen-manifest.py" --mods "$SRC" --out "$WWW" --base-url "$BASE" \
-    --generated-at "$ts" "$@" >/dev/null
+    --generated-at "$LAST_TS" "$@" >/dev/null
+}
+# 用与上次相同的 generatedAt 重新生成：内容一致 → 服务器返回 304；内容变了 → 顺序护栏生效
+regen_same() {
+  python3 "$ROOT/test/gen-manifest.py" --mods "$SRC" --out "$WWW" --base-url "$BASE" \
+    --generated-at "$LAST_TS" "$@" >/dev/null
 }
 regen_old() { # 用比上次更旧（或相同）的时间戳重新生成
   python3 "$ROOT/test/gen-manifest.py" --mods "$SRC" --out "$WWW" --base-url "$BASE" \
@@ -92,7 +97,7 @@ make_mod "$SANDBOX/mods/sodium-player-1.0.jar" sodium "player-sodium-v1"
 regen
 
 say "启动静态清单服务器 http://127.0.0.1:$PORT"
-python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$WWW" >"$WS/http.log" 2>&1 &
+python3 "$ROOT/test/serve-etag.py" "$PORT" "$WWW" >"$WS/http.log" 2>&1 &
 HTTP_PID=$!
 for _ in $(seq 1 50); do curl -sf "$MANIFEST_URL" -o /dev/null && break; sleep 0.2; done
 if ! curl -sf "$MANIFEST_URL" -o /dev/null; then echo "静态服务器启动失败" >&2; cat "$WS/http.log" >&2; exit 1; fi
@@ -151,6 +156,13 @@ assert_file_absent "$SANDBOX/mods/sodium-custom-1.0.jar" "玩家冲突版本被�
 assert_file_exists "$SANDBOX/modsync/archive/sodium-custom-1.0.jar" "玩家版本进了 archive（可恢复）"
 assert_log "$WS/t6.log" "归档玩家模组" "日志说明了归档原因"
 
+say "T6b 清单未变（304）时玩家丢进冲突模组：仍必须归档"
+make_mod "$SANDBOX/mods/sodium-collide-1.0.jar" sodium "player-collide"
+regen_same
+run_agent "$WS/t6b.log"
+assert_file_absent "$SANDBOX/mods/sodium-collide-1.0.jar" "冲突文件被移出 mods/（否则重复 modId 会崩游戏）"
+assert_file_exists "$SANDBOX/modsync/archive/sodium-collide-1.0.jar" "冲突文件进了 archive"
+
 # ------------------------------------------------------- T7 服务器删除模组
 say "T7 服务器删掉模组：账本与 mods/ 同步移除，旧版进 trash"
 rm -f "$SRC/apple-1.0.jar"
@@ -170,6 +182,13 @@ assert_file_exists "$SANDBOX/mods/create-2.0.jar" "新文件就位"
 assert_file_absent "$SANDBOX/mods/create-1.0.jar" "旧文件已清除"
 assert_log "$WS/t8.log" "服务器更新" "日志标为更新"
 assert_no_log "$WS/t8.log" "本轮只增改" "没有被删除护栏误拦"
+
+say "T8b 时间戳未前进时服务器改名：仍必须落地（不能新旧并存）"
+mv "$SRC/sodium-1.0.jar" "$SRC/sodium-2.0.jar"
+regen_same
+run_agent "$WS/t8b.log"
+assert_file_exists "$SANDBOX/mods/sodium-2.0.jar" "新文件就位"
+assert_file_absent "$SANDBOX/mods/sodium-1.0.jar" "旧文件被清除（时间戳没前进也一样）"
 
 # ---------------------------------------------------- T9 时间戳顺序护栏
 say "T9 清单时间戳更旧：只增改不删"
@@ -205,11 +224,13 @@ run_agent "$WS/t11b.log"
 assert_same_content "$SANDBOX/mods-server/create-2.0.jar" "$SANDBOX/mods/create-2.0.jar" "被改坏的文件已修复"
 
 # ---------------------------------------------------- T12 结构检查
-say "T12 运行期文件结构"
+say "T12 304 路径与运行期结构"
+assert_log "$WS/t6b.log" "304" "清单未变时走到了 304 分支（真 ETag/If-None-Match）"
+
 assert_file_exists "$SANDBOX/modsync/state.json" "state.json 存在"
 assert_file_exists "$SANDBOX/modsync/last-manifest.json" "last-manifest.json 存在"
 HIST="$(ls -1 "$SANDBOX/modsync/manifest-history" 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$HIST" -le 5 ]; then pass "manifest-history 最多 5 份（当前 $HIST）"; else fail "manifest-history 超过 5 份（$HIST）"; fi
+if [ "$HIST" -le 5 ]; then pass "manifest-history 最多 5 份（当前 ${HIST}）"; else fail "manifest-history 超过 5 份（${HIST}）"; fi
 if has_file "$SANDBOX/modsync/trash" 'apple-1.0.jar*'; then pass "被删的服务器模组在 trash 里有备份"; else fail "trash 里没有 apple-1.0.jar"; fi
 assert_file_absent "$SANDBOX/mods-client" "全程没有 mods-client"
 

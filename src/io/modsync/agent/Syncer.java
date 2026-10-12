@@ -1,5 +1,6 @@
 package io.modsync.agent;
 
+import io.modsync.common.Json;
 import io.modsync.common.ModMeta;
 
 import java.io.IOException;
@@ -16,10 +17,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -38,34 +40,61 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 /**
- * The whole pre-launch sync:
+ * 增量对账式同步（v1.2.0，规格见 {@code docs/design-reconcile.md}）。
+ *
+ * <p>{@code mods/} 是玩家真实生效目录，{@code mods-server/} 是服务端镜像（账本），清单是权威内容。
+ * 一次同步固定按下面的顺序走：
  *
  * <ol>
- *   <li>fetch the server manifest (304-aware),</li>
- *   <li>verify {@code mods-server} by sha256 and download only what is missing/changed,</li>
- *   <li>move stale server files to {@code modsync/trash},</li>
- *   <li>migrate player-dropped jars from {@code mods/} into {@code mods-client/},</li>
- *   <li>rebuild {@code mods/} from {@code mods-server} + {@code mods-client}, server winning on
- *       duplicated mod ids.</li>
+ *   <li>拉取清单（304 感知），判定清单是否有效、是否允许删除；</li>
+ *   <li>计划：diff（清单 ↔ 账本）+ {@code mods/} 补齐扫描 + 玩家碰撞扫描；</li>
+ *   <li>下载全部需要的新文件到 {@code modsync/tmp/} 并逐个校验 sha；</li>
+ *   <li>REMOVE（先从 {@code mods/} 与账本里删，避免出现两个同 modId 的 jar）；</li>
+ *   <li>RENAME / EVICT（旧版进 trash，玩家版进 archive）；</li>
+ *   <li>ADD / UPDATE / DEPLOY（tmp → 原子 move 进 {@code mods/}，随后更新账本）；</li>
+ *   <li>写 last-manifest / history / state / removal-log，校验扫描并汇总。</li>
  * </ol>
+ *
+ * <p>不变量：删除只能由账本差集驱动；{@code mods/} 里不在账本、modId 也不冲突的文件永不触碰；
+ * 服务器模组不进 archive；清单不可信时本轮完全不动。
  */
 public final class Syncer {
 
-    private static final DateTimeFormatter TRASH_STAMP =
-            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(java.time.ZoneOffset.UTC);
+    /** 时间戳目录名（trash 批次）。 */
+    private static final DateTimeFormatter BATCH_STAMP =
+            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneOffset.UTC);
+    /** 历史清单文件名（毫秒精度，保证同一秒内多次同步不互相覆盖）。 */
+    private static final DateTimeFormatter HISTORY_STAMP =
+            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS").withZone(ZoneOffset.UTC);
 
     /** How many trash batches to keep before pruning the oldest. */
     private static final int TRASH_KEEP = 10;
+    /** How many manifest history snapshots to keep. */
+    private static final int HISTORY_KEEP = 5;
 
+    private static final String LAST_MANIFEST = "last-manifest.json";
+    private static final String HISTORY_DIR = "manifest-history";
+    private static final String ARCHIVE_DIR = "archive";
+    private static final String TRASH_DIR = "trash";
+    private static final String TMP_DIR = "tmp";
+    private static final String REMOVAL_LOG = "removal-log.jsonl";
+    private static final String LOCK_FILE = "lock";
+    private static final String STATE_FILE = "state.json";
+
+    /** 最近一次失败原因（仅用于日志），不参与判定。 */
     public static final class Result {
         public boolean manifestFetched;
+        /** 账本里已符合清单、无需下载的文件数。 */
         public int verified;
         public int downloaded;
+        /** 因清单里路径消失（且 modId 也不在清单）而删除的服务器模组数。 */
         public int removed;
-        public int migrated;
-        public int conflicts;
+        /** 移入 {@code modsync/archive/} 的玩家模组数。 */
+        public int archived;
+        /** 同 modId 换文件名的非破坏性改名数（不计入删除）。 */
+        public int renamed;
+        /** 本轮放进 {@code mods/} 的文件数（ADD + UPDATE + DEPLOY）。 */
         public int deployed;
-        public boolean rebuilt;
         /** True when the server announced a different Minecraft or loader version. */
         public boolean versionMismatch;
         /** True when the sync was skipped because of a Minecraft version mismatch. */
@@ -89,11 +118,35 @@ public final class Syncer {
         }
     }
 
+    /** 清单里的一个期望文件。{@code modId}/{@code url} 可能缺失。 */
     private record Desired(String sha256, long size, String modId, String url) {
     }
 
-    /** A file that must exist in {@code mods/} after the rebuild, with its verified hash. */
-    private record PlanItem(Path src, long size, String sha256, String origin) {
+    /** 本轮用到的目录，集中一处避免到处拼路径。 */
+    private record Layout(Path serverDir, Path targetDir, Path work) {
+        Path tmp() {
+            return work.resolve(TMP_DIR);
+        }
+
+        Path archive() {
+            return work.resolve(ARCHIVE_DIR);
+        }
+
+        Path history() {
+            return work.resolve(HISTORY_DIR);
+        }
+
+        Path lastManifest() {
+            return work.resolve(LAST_MANIFEST);
+        }
+
+        Path removalLog() {
+            return work.resolve(REMOVAL_LOG);
+        }
+
+        Path stateFile() {
+            return work.resolve(STATE_FILE);
+        }
     }
 
     private final AgentConfig cfg;
@@ -114,30 +167,59 @@ public final class Syncer {
     }
 
     public Result run() throws Exception {
-        Path serverDir = gameDir.resolve(cfg.serverDirName);
-        Path clientDir = gameDir.resolve(cfg.clientDirName);
-        Path targetDir = gameDir.resolve(cfg.targetDirName);
-        Path work = AgentConfig.workDir(gameDir);
-        Path stateFile = work.resolve("state.json");
-        Files.createDirectories(serverDir);
-        Files.createDirectories(clientDir);
-        Files.createDirectories(work);
+        Layout l = new Layout(
+                gameDir.resolve(cfg.serverDirName),
+                gameDir.resolve(cfg.targetDirName),
+                AgentConfig.workDir(gameDir));
+        Files.createDirectories(l.serverDir());
+        Files.createDirectories(l.targetDir());
+        Files.createDirectories(l.work());
 
-        State state = State.load(stateFile);
+        State state = State.load(l.stateFile());
         Result result = new Result();
+        Path lock = null;
+        try {
+            if (!cfg.dryRun) {
+                lock = tryAcquireLock(l.work());
+                if (lock == null) {
+                    return result; // 另一个活着的实例正在同步，本轮让位
+                }
+            }
+            sync(l, state, result);
+            return result;
+        } finally {
+            if (lock != null) {
+                releaseLock(lock);
+            }
+        }
+    }
 
-        // ---------------------------------------------------------- 1. manifest
+    // ------------------------------------------------------------------ 主流程
+
+    private void sync(Layout l, State state, Result result) throws Exception {
+        // ---------------------------------------------------------- 1. 拉取清单
         progress.phase("获取服务器清单");
-        Manifest manifest = Manifest.fetch(cfg.manifestUrl, state.etag, cfg.timeoutSeconds);
+        String previousServerId = state.serverId;
+        Manifest manifest;
+        try {
+            manifest = Manifest.fetch(cfg.manifestUrl, state.etag, cfg.timeoutSeconds);
+        } catch (IOException e) {
+            unusableManifest(result, e.getMessage());
+            return;
+        }
+        if (manifest != null && (manifest.rawBody == null || manifest.rawBody.isBlank())) {
+            unusableManifest(result, "响应体为空");
+            return;
+        }
+        if (manifest != null && manifest.files.isEmpty()) {
+            unusableManifest(result, "files 数组为空");
+            return;
+        }
+
         Map<String, Desired> desired = new LinkedHashMap<>();
         String base = "";
         if (manifest != null) {
             result.manifestFetched = true;
-            if (!state.serverId.isEmpty() && !manifest.serverId.isEmpty() && !manifest.serverId.equals(state.serverId)) {
-                progress.info("服务器标识变化 " + state.serverId + " -> " + manifest.serverId + "，清空本地同步记录");
-                state.serverFiles.clear();
-                state.deployed.clear();
-            }
             for (Manifest.Entry e : manifest.files) {
                 if (!e.path.startsWith("mods/")) {
                     progress.warn("清单包含暂不支持的路径，已跳过: " + e.path);
@@ -145,43 +227,77 @@ public final class Syncer {
                 }
                 desired.put(e.fileName(), new Desired(e.sha256, e.size, e.modId, e.url));
             }
-            if (!manifest.serverId.isEmpty()) {
-                state.serverId = manifest.serverId;
+            if (desired.isEmpty()) {
+                unusableManifest(result, "清单没有 mods/ 条目");
+                return;
             }
-            state.manifestHash = manifest.rawHash;
-            state.etag = manifest.etag;
             base = manifest.downloadBase();
             progress.info("清单: " + manifest.summary());
         } else {
             progress.info("清单未变化 (HTTP 304)，沿用上次结果");
             for (Map.Entry<String, State.FileInfo> e : state.serverFiles.entrySet()) {
-                desired.put(e.getKey(), new Desired(e.getValue().sha256, e.getValue().size, null, null));
+                desired.put(e.getKey(), new Desired(e.getValue().sha256, e.getValue().size, e.getValue().modId, null));
             }
         }
 
-        // ---------------------------------------------------------- 1b. version check
+        // ---------------------------------------------------------- 1b. 版本比对
         if (manifest != null && checkVersionCompatibility(manifest, result)) {
             progress.info("按配置跳过本次同步（Minecraft 版本不匹配）");
             state.lastSyncAt = now();
             if (!cfg.dryRun) {
-                state.save(stateFile);
+                state.save(l.stateFile());
             }
-            return result;
+            return;
         }
 
-        // ---------------------------------------------------------- 2. verify + download
+        // ---------------------------------------------------------- 2. 可信度检查
+        boolean mayDelete = false;
+        if (manifest != null) {
+            String reason = deletionBlockReason(manifest, state, previousServerId, l.lastManifest());
+            if (reason == null) {
+                mayDelete = true;
+            } else {
+                progress.info("本轮只增改，不删除（原因：" + reason + "）");
+            }
+            if (!previousServerId.isBlank() && !manifest.serverId.isBlank()
+                    && !previousServerId.equals(manifest.serverId)) {
+                state.serverFiles.clear();
+                state.manifestHash = "";
+                state.manifestGeneratedAt = "";
+            }
+            if (!manifest.serverId.isBlank()) {
+                state.serverId = manifest.serverId;
+            }
+            state.etag = manifest.etag;
+        }
+
+        // ---------------------------------------------------------- 3. 计划：账本预检
+        progress.phase("对账 " + cfg.serverDirName);
+        Map<String, Path> ledger = listJarsMap(l.serverDir());
+        Map<String, String> ledgerSha = new LinkedHashMap<>();
+        Set<String> ledgerOk = new HashSet<>();
         List<Map.Entry<String, Desired>> pending = new ArrayList<>();
         long pendingBytes = 0;
         for (Map.Entry<String, Desired> e : desired.entrySet()) {
-            if (matches(serverDir.resolve(e.getKey()), e.getValue())) {
+            String name = e.getKey();
+            Path file = ledger.get(name);
+            if (file != null && ledgerMatches(file, name, e.getValue(), state)) {
+                ledgerOk.add(name);
+                ledgerSha.put(name, e.getValue().sha256());
                 result.verified++;
                 continue;
+            }
+            if (file != null) {
+                // 旧账本内容的 sha：决定 mods/ 里的同名文件是服务器旧版（进 trash）还是玩家的（进 archive）
+                ledgerSha.put(name, ledgerSha(file, name, state));
             }
             pending.add(e);
             pendingBytes += Math.max(0, e.getValue().size());
         }
         progress.info("校验 " + cfg.serverDirName + ": 已符合 " + result.verified + " 个"
                 + (pending.isEmpty() ? "" : "，需下载 " + pending.size() + " 个 (" + humanBytes(pendingBytes) + ")"));
+
+        // ---------------------------------------------------------- 3b. 下载（先全部落到 tmp 并校验）
         if (!pending.isEmpty()) {
             if (cfg.dryRun) {
                 for (Map.Entry<String, Desired> e : pending) {
@@ -191,7 +307,7 @@ public final class Syncer {
             } else {
                 progress.phase("下载模组");
                 progress.setTotal(pendingBytes, pending.size());
-                downloadAll(pending, base, serverDir, work);
+                downloadAll(pending, base, l.tmp());
                 result.downloaded = pending.size();
             }
         }
@@ -199,115 +315,307 @@ public final class Syncer {
             throw new CancelledException();
         }
 
-        // ---------------------------------------------------------- 3. remove stale server files
-        progress.phase("清理过期文件");
-        Set<String> keep = new HashSet<>(desired.keySet());
-        for (Path jar : listJars(serverDir)) {
-            String name = jar.getFileName().toString();
-            if (keep.contains(name)) {
+        // ---------------------------------------------------------- 3c. 计划：REMOVE / RENAME / EVICT
+        progress.phase("对账 " + cfg.targetDirName);
+        Map<String, Path> modsFiles = listJarsMap(l.targetDir());
+        Set<String> manifestModIds = new HashSet<>();
+        Map<String, String> manifestNameByModId = new LinkedHashMap<>();
+        for (Map.Entry<String, Desired> e : desired.entrySet()) {
+            String id = normalizeId(e.getValue().modId());
+            if (id != null) {
+                manifestModIds.add(id);
+                manifestNameByModId.putIfAbsent(id, e.getKey());
+            }
+        }
+
+        List<String> removals = new ArrayList<>();
+        Map<String, String> renames = new LinkedHashMap<>();
+        for (Map.Entry<String, Path> e : ledger.entrySet()) {
+            String name = e.getKey();
+            if (desired.containsKey(name)) {
                 continue;
             }
-            if (cfg.dryRun) {
-                progress.info("[dry-run] 将移除 " + cfg.serverDirName + "/" + name);
+            String sha = ledgerSha(e.getValue(), name, state);
+            ledgerSha.put(name, sha);
+            String modId = ledgerModId(e.getValue(), name, state);
+            String newName = modId == null ? null : manifestNameByModId.get(modId);
+            if (newName != null) {
+                renames.put(name, newName);
             } else {
-                moveToTrash(jar, work);
-                progress.info("移除过期文件 " + cfg.serverDirName + "/" + name + " (已放入 modsync/trash)");
+                removals.add(name);
             }
+        }
+
+        List<String> evictions = new ArrayList<>();
+        for (Map.Entry<String, Path> e : modsFiles.entrySet()) {
+            if (ledger.containsKey(e.getKey())) {
+                continue;
+            }
+            String modId = targetModId(e.getValue(), e.getKey(), state);
+            if (modId != null && manifestModIds.contains(modId)) {
+                evictions.add(e.getKey());
+            }
+        }
+
+        if (!mayDelete) {
+            // 阶段 2 判定「不允许删除」时，只保留 ADD / UPDATE / DEPLOY。
+            //
+            // RENAME 与 EVICT 不在这里清理：它们不是"服务器删掉了某个模组"，而是"同一个 modId 换了
+            // 文件"和"玩家那份与服务器撞车"。若把它们一起拦下，本轮就会"加了新的却留着旧的"，
+            // 两个同 modId 的 jar 同时躺在 mods/ 里会直接让游戏崩。两者都只进 trash/archive，可恢复。
+            removals.clear();
+        }
+
+        String fingerprint = manifest != null ? manifest.rawHash : state.manifestHash;
+
+        // ---------------------------------------------------------- 4. REMOVE（先删后加）
+        for (String name : removals) {
+            String sha = ledgerSha.get(name);
+            Path inMods = modsFiles.get(name);
+            if (cfg.dryRun) {
+                progress.info("[dry-run] 将移除 " + cfg.targetDirName + "/" + name);
+                result.removed++;
+                continue;
+            }
+            if (inMods != null) {
+                if (sameSha(inMods, name, sha, state)) {
+                    moveToTrash(inMods, l.work());
+                } else {
+                    archivePlayer(inMods, name, l, fingerprint, "", result);
+                }
+            }
+            Files.deleteIfExists(l.serverDir().resolve(name));
+            state.serverFiles.remove(name);
+            progress.info("服务器已删除 " + cfg.targetDirName + "/" + name);
+            appendRemovalLog(l, "remove", cfg.targetDirName + "/" + name, sha,
+                    "服务器清单不再包含该路径，modId 也不再出现", fingerprint);
             result.removed++;
         }
-        state.serverFiles.clear();
-        for (Map.Entry<String, Desired> e : desired.entrySet()) {
-            state.serverFiles.put(e.getKey(), new State.FileInfo(e.getValue().sha256(), e.getValue().size(), "server"));
-        }
 
-        // ---------------------------------------------------------- 4. rescue player-dropped jars
-        progress.phase("对齐 mods 目录");
-        Map<String, Path> inTarget = listJarsMap(targetDir);
-        if (cfg.autoMigrateUnknownMods && !inTarget.isEmpty()) {
-            for (Map.Entry<String, Path> e : inTarget.entrySet()) {
-                String name = e.getKey();
-                if (state.deployed.containsKey(name)) {
-                    continue;
-                }
-                Path src = e.getValue();
-                Path dst = clientDir.resolve(name);
-                if (cfg.dryRun) {
-                    progress.info("[dry-run] 将迁移 mods/" + name + " -> " + cfg.clientDirName + "/");
-                } else if (Files.exists(dst) && sameContent(src, dst)) {
-                    moveToTrash(src, work);
-                    progress.info("mods/" + name + " 与 " + cfg.clientDirName + " 中的副本一致，已放入 modsync/trash");
-                } else {
-                    if (Files.exists(dst)) {
-                        dst = uniqueName(clientDir, name);
-                    }
-                    Files.move(src, dst, StandardCopyOption.REPLACE_EXISTING);
-                    progress.info("迁移玩家自装模组 mods/" + name + " -> " + cfg.clientDirName + "/" + dst.getFileName());
-                }
-                result.migrated++;
-            }
-        }
-
-        // ---------------------------------------------------------- 5. plan
-        LinkedHashMap<String, PlanItem> plan = new LinkedHashMap<>();
-        Map<String, String> modIdCache = new HashMap<>();
-        Set<String> serverIds = new HashSet<>();
-        for (Path jar : listJars(serverDir)) {
-            String name = jar.getFileName().toString();
-            Desired d = desired.get(name);
-            String sha = (d != null && matches(jar, d)) ? d.sha256() : ModMeta.sha256(jar);
-            plan.put(name, new PlanItem(jar, Files.size(jar), sha, "server"));
-            String id = modIdOf(jar, modIdCache);
-            if (id != null) {
-                serverIds.add(id);
-            }
-        }
-        for (Path jar : listJars(clientDir)) {
-            String name = jar.getFileName().toString();
-            String id = modIdOf(jar, modIdCache);
-            if (plan.containsKey(name)) {
-                result.conflicts++;
-                progress.info("跳过客户端模组 " + name + "（与服务器文件同名，以服务器版本为准）");
-                continue;
-            }
-            if (id != null && serverIds.contains(id)) {
-                result.conflicts++;
-                progress.info("跳过客户端模组 " + name + "（mod id=" + id + " 与服务器重复，以服务器版本为准）");
-                continue;
-            }
-            plan.put(name, new PlanItem(jar, Files.size(jar), ModMeta.sha256(jar), "client"));
-        }
-        String fingerprint = fingerprint(state.manifestHash, plan);
-
-        boolean upToDate = targetMatches(targetDir, plan, state) && !cfg.forceRebuild;
-        if (upToDate) {
-            progress.info(cfg.targetDirName + " 已是最新（" + plan.size() + " 个模组），无需重组");
-        } else {
-            progress.phase("重组 " + cfg.targetDirName + " 目录");
+        // ---------------------------------------------------------- 5. RENAME / EVICT
+        for (Map.Entry<String, String> r : renames.entrySet()) {
+            String oldName = r.getKey();
+            String newName = r.getValue();
+            String sha = ledgerSha.get(oldName);
+            Path inMods = modsFiles.get(oldName);
             if (cfg.dryRun) {
-                progress.info("[dry-run] 将重组 " + plan.size() + " 个模组到 " + cfg.targetDirName + "/");
-            } else {
-                rebuild(targetDir, plan, work, state);
-                result.deployed = plan.size();
-                state.lastBuildAt = now();
-                progress.info("已重组 " + cfg.targetDirName + "/: 服务器 " + serverIds.size() + " 个 id, 共部署 " + plan.size() + " 个 jar"
-                        + (result.conflicts > 0 ? "，跳过低优先级重复 " + result.conflicts + " 个" : ""));
+                progress.info("[dry-run] 将改名 " + cfg.targetDirName + "/" + oldName + " -> " + newName);
+                continue;
             }
-            result.rebuilt = true;
+            if (inMods != null) {
+                if (sameSha(inMods, oldName, sha, state)) {
+                    moveToTrash(inMods, l.work());
+                } else {
+                    // sha 传空：归档日志要记玩家那份的真实 sha，而不是账本旧版的
+                    archivePlayer(inMods, oldName, l, fingerprint, "", result);
+                }
+            }
+            Files.deleteIfExists(l.serverDir().resolve(oldName));
+            state.serverFiles.remove(oldName);
+            result.renamed++;
+            progress.info("服务器更新 " + cfg.targetDirName + "/" + oldName + " -> " + cfg.targetDirName + "/" + newName);
+            appendRemovalLog(l, "rename", cfg.targetDirName + "/" + oldName, sha,
+                    "同 modId 换成新文件名 " + newName, fingerprint);
         }
 
-        state.lastSyncAt = now();
-        state.lastFingerprint = fingerprint;
+        for (String name : evictions) {
+            Path inMods = modsFiles.get(name);
+            if (inMods == null) {
+                continue;
+            }
+            if (cfg.dryRun) {
+                progress.info("[dry-run] 将归档 " + cfg.targetDirName + "/" + name);
+                result.archived++;
+                continue;
+            }
+            archivePlayer(inMods, name, l, fingerprint, "", result);
+        }
+
+        // ---------------------------------------------------------- 6. ADD / UPDATE / DEPLOY
+        List<String> installs = new ArrayList<>();
+        Map<String, String> modes = new HashMap<>();
+        for (Map.Entry<String, Desired> e : desired.entrySet()) {
+            String name = e.getKey();
+            boolean ledgerFine = ledgerOk.contains(name);
+            if (ledgerFine && modsMatches(l.targetDir().resolve(name), name, e.getValue(), state)) {
+                continue;
+            }
+            installs.add(name);
+            modes.put(name, ledgerFine ? "deploy" : (ledger.containsKey(name) ? "update" : "add"));
+        }
+
+        for (String name : installs) {
+            Desired d = desired.get(name);
+            String mode = modes.get(name);
+            boolean deploy = "deploy".equals(mode);
+            Path source = deploy
+                    ? l.serverDir().resolve(name)
+                    : l.tmp().resolve("dl-" + d.sha256() + ".part");
+            if (cfg.dryRun) {
+                progress.info("[dry-run] 将" + modeVerb(mode) + " " + cfg.targetDirName + "/" + name);
+                result.deployed++;
+                continue;
+            }
+            Path dst = l.targetDir().resolve(name);
+            if (Files.isRegularFile(dst)) {
+                String actual = modsSha(dst, name, state);
+                if (!actual.equalsIgnoreCase(d.sha256())) {
+                    String previous = ledgerSha.get(name);
+                    if (previous != null && previous.equalsIgnoreCase(actual)) {
+                        moveToTrash(dst, l.work());
+                    } else {
+                        archivePlayer(dst, name, l, fingerprint, actual, result);
+                    }
+                }
+            }
+            installIntoMods(l, name, source, d);
+            if (deploy) {
+                progress.info("补回 " + cfg.targetDirName + "/" + name);
+                appendRemovalLog(l, "deploy", cfg.targetDirName + "/" + name, d.sha256(),
+                        "mods/ 缺失或被改动，从账本补回", fingerprint);
+            } else {
+                putLedger(l, name, source, d, state);
+                if ("update".equals(mode)) {
+                    progress.info("服务器更新 " + cfg.targetDirName + "/" + name + " -> "
+                            + cfg.targetDirName + "/" + name);
+                } else {
+                    progress.info("新增 " + cfg.targetDirName + "/" + name);
+                }
+                appendRemovalLog(l, mode, cfg.targetDirName + "/" + name, d.sha256(),
+                        "update".equals(mode) ? "服务器同路径内容更新" : "服务器新增模组", fingerprint);
+            }
+            result.deployed++;
+        }
+
+        // ---------------------------------------------------------- 7. 落盘 + 校验扫描 + 汇总
         if (!cfg.dryRun) {
-            state.save(stateFile);
+            if (manifest != null) {
+                Files.writeString(l.lastManifest(), manifest.rawBody, StandardCharsets.UTF_8);
+                writeHistory(l, manifest.rawBody);
+                state.manifestHash = manifest.rawHash;
+                state.manifestGeneratedAt = manifest.generatedAt == null ? "" : manifest.generatedAt;
+            }
+            state.lastSyncAt = now();
+            refreshServerFiles(l, state);
+            refreshDeployed(l, state);
+            pruneTrash(l.work());
+            cleanTmp(l);
+            state.save(l.stateFile());
         }
-
         progress.info("完成: 校验 " + result.verified + "，下载 " + result.downloaded + "，移除 " + result.removed
-                + "，迁移 " + result.migrated + "，冲突跳过 " + result.conflicts
-                + (result.rebuilt ? "，已重组" : "，未重组"));
-        return result;
+                + "，归档 " + result.archived + "，补齐 " + result.deployed);
     }
 
-    // ------------------------------------------------------------------ version check
+    /** 清单为空/坏/拉不动：本轮完全不动（不删也不加），非 strict 时照常启动。 */
+    private void unusableManifest(Result result, String detail) throws IOException {
+        result.manifestFetched = false;
+        progress.info("清单为空或无法解析，按获取失败处理：本轮不做任何改动"
+                + (detail == null || detail.isBlank() ? "" : "（" + detail + "）"));
+        if (cfg.strict) {
+            throw new IOException("清单不可用: " + detail);
+        }
+    }
+
+    // ------------------------------------------------------------------ 删除护栏
+
+    /**
+     * 四条护栏，全满足才允许删除。
+     *
+     * @return {@code null} 表示允许删除，否则是拒绝原因
+     */
+    private String deletionBlockReason(Manifest manifest, State state, String previousServerId, Path lastManifestFile) {
+        if (previousServerId.isBlank() || manifest.serverId.isBlank() || !previousServerId.equals(manifest.serverId)) {
+            return "服务器标识与本地记录不同或首次同步";
+        }
+        if (cfg.forceSync) {
+            progress.info("已按 --force-sync 忽略清单 generatedAt 顺序护栏");
+        } else {
+            Instant previous = parseInstant(state.manifestGeneratedAt);
+            Instant current = parseInstant(manifest.generatedAt);
+            if (previous == null || current == null) {
+                return "缺少可比对的 generatedAt（本地或服务器）";
+            }
+            if (!current.isAfter(previous)) {
+                return "清单时间戳未前进（本地 " + state.manifestGeneratedAt + "，服务器 " + manifest.generatedAt + "）";
+            }
+        }
+        if (state.manifestHash.isBlank() || !lastManifestMatches(lastManifestFile, state.manifestHash)) {
+            return "缺少上次成功应用的清单（" + LAST_MANIFEST + "）";
+        }
+        return null;
+    }
+
+    private static Instant parseInstant(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(text.trim());
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static boolean lastManifestMatches(Path file, String expectedSha) {
+        if (!Files.isRegularFile(file)) {
+            return false;
+        }
+        try {
+            return ModMeta.sha256(file).equalsIgnoreCase(expectedSha);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------ 实例锁
+
+    /**
+     * 取实例锁（{@code modsync/lock}，含 PID）。
+     *
+     * @return 锁文件路径；已有一个活着的实例持锁时返回 {@code null}
+     */
+    private Path tryAcquireLock(Path work) throws IOException {
+        Path lock = work.resolve(LOCK_FILE);
+        if (Files.isRegularFile(lock)) {
+            long pid = lockPid(lock);
+            long self = ProcessHandle.current().pid();
+            if (pid > 0 && pid != self && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+                progress.warn("另一个 ModSync 实例正在运行（PID " + pid + "），本轮跳过同步，避免互相删除文件");
+                return null;
+            }
+            if (pid > 0) {
+                progress.info("接管陈旧的实例锁（PID " + pid + " 已不存在）");
+            }
+        }
+        Map<String, Object> body = Json.map();
+        body.put("pid", ProcessHandle.current().pid());
+        body.put("time", now());
+        Files.createDirectories(work);
+        Files.writeString(lock, Json.write(body), StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+        return lock;
+    }
+
+    private static long lockPid(Path lock) {
+        try {
+            Map<String, Object> root = Json.asObject(Json.parse(Files.readString(lock, StandardCharsets.UTF_8)));
+            return root == null ? -1L : Json.num(root, "pid", -1L);
+        } catch (IOException | RuntimeException e) {
+            return -1L;
+        }
+    }
+
+    private static void releaseLock(Path lock) {
+        try {
+            if (lockPid(lock) == ProcessHandle.current().pid()) {
+                Files.deleteIfExists(lock);
+            }
+        } catch (IOException ignored) {
+            // 释放锁失败不影响同步结果
+        }
+    }
+
+    // ------------------------------------------------------------------ 版本比对
 
     /**
      * Compares the server's announced Minecraft/loader versions with the local instance.
@@ -366,11 +674,9 @@ public final class Syncer {
         return false;
     }
 
-    // ------------------------------------------------------------------ downloads
+    // ------------------------------------------------------------------ 下载
 
-    private void downloadAll(List<Map.Entry<String, Desired>> pending, String base, Path serverDir, Path work)
-            throws Exception {
-        Path tmpDir = work.resolve("tmp");
+    private void downloadAll(List<Map.Entry<String, Desired>> pending, String base, Path tmpDir) throws Exception {
         Files.createDirectories(tmpDir);
         int threads = Math.max(1, Math.min(cfg.parallelDownloads, pending.size()));
         ExecutorService pool = Executors.newFixedThreadPool(threads, r -> {
@@ -387,7 +693,7 @@ public final class Syncer {
                         return null;
                     }
                     try {
-                        downloadOne(entry.getKey(), entry.getValue(), base, serverDir, tmpDir);
+                        downloadOne(entry.getKey(), entry.getValue(), base, tmpDir);
                     } catch (CancelledException ce) {
                         throw ce;
                     } catch (Exception ex) {
@@ -416,7 +722,7 @@ public final class Syncer {
         }
     }
 
-    private void downloadOne(String name, Desired desired, String base, Path serverDir, Path tmpDir) throws Exception {
+    private void downloadOne(String name, Desired desired, String base, Path tmpDir) throws Exception {
         progress.fileStart(name, desired.size());
         Path tmp = tmpDir.resolve("dl-" + desired.sha256() + ".part");
         if (!matches(tmp, desired)) {
@@ -434,12 +740,6 @@ public final class Syncer {
         if (!matches(tmp, desired)) {
             Files.deleteIfExists(tmp);
             throw new IOException("sha256 校验失败");
-        }
-        Path dst = serverDir.resolve(name);
-        try {
-            Files.move(tmp, dst, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(tmp, dst, StandardCopyOption.REPLACE_EXISTING);
         }
         progress.fileDone(name);
     }
@@ -470,53 +770,104 @@ public final class Syncer {
         }
     }
 
-    // ------------------------------------------------------------------ rebuild
+    // ------------------------------------------------------------------ 文件操作
 
-    private void rebuild(Path targetDir, Map<String, PlanItem> plan, Path work, State state) throws IOException {
-        Files.createDirectories(targetDir);
-        Map<String, Path> present = listJarsMap(targetDir);
-        Map<String, State.FileInfo> deployed = new LinkedHashMap<>();
-        for (Map.Entry<String, PlanItem> e : plan.entrySet()) {
-            String name = e.getKey();
-            PlanItem item = e.getValue();
-            Path existing = present.get(name);
-            if (existing != null && sameContent(existing, item)) {
-                // Already exactly right: keep the file in place (no copy, no trash churn).
-                deployed.put(name, new State.FileInfo(item.sha256(), item.size(), item.origin(),
-                        Files.getLastModifiedTime(existing).toMillis()));
-                continue;
-            }
-            if (existing != null) {
-                moveToTrash(existing, work);
-            }
-            Path dst = targetDir.resolve(name);
-            Files.copy(item.src(), dst, StandardCopyOption.REPLACE_EXISTING);
-            deployed.put(name, new State.FileInfo(item.sha256(), item.size(), item.origin(),
-                    Files.getLastModifiedTime(dst).toMillis()));
+    /** tmp → 原子 move 进 {@code mods/}；同名冲突由调用方先归档。 */
+    private void installIntoMods(Layout l, String name, Path source, Desired d) throws IOException {
+        Files.createDirectories(l.tmp());
+        Path stage = l.tmp().resolve("install-" + d.sha256() + ".part");
+        Files.copy(source, stage, StandardCopyOption.REPLACE_EXISTING);
+        Path dst = l.targetDir().resolve(name);
+        try {
+            Files.move(stage, dst, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(stage, dst, StandardCopyOption.REPLACE_EXISTING);
         }
-        // Leftovers that the agent itself deployed and that are no longer wanted.
-        for (Map.Entry<String, Path> e : present.entrySet()) {
-            if (!plan.containsKey(e.getKey()) && state.deployed.containsKey(e.getKey())) {
-                moveToTrash(e.getValue(), work);
-            }
-        }
-        state.deployed.clear();
-        state.deployed.putAll(deployed);
-        pruneTrash(work);
     }
 
-    /** True when the on-disk file already matches the planned content. */
-    private static boolean sameContent(Path file, PlanItem item) {
+    /** 把新内容写进账本（旧账本文件进 trash）。 */
+    private void putLedger(Layout l, String name, Path source, Desired d, State state) throws IOException {
+        Path dst = l.serverDir().resolve(name);
+        if (!source.equals(dst)) {
+            if (Files.isRegularFile(dst)) {
+                moveToTrash(dst, l.work());
+            }
+            Files.copy(source, dst, StandardCopyOption.REPLACE_EXISTING);
+        }
+        String modId = normalizeId(d.modId());
+        state.serverFiles.put(name, stamp(dst, d.sha256(), "server", modId == null ? "" : modId));
+    }
+
+    /** 玩家模组进 {@code modsync/archive/}：每个文件名只留一份，永不自动放回。 */
+    private void archivePlayer(Path file, String name, Layout l, String fingerprint, String sha, Result result)
+            throws IOException {
+        Path dir = l.archive();
+        Files.createDirectories(dir);
+        Path dst = dir.resolve(name);
+        String actual = sha;
+        if (actual == null || actual.isEmpty()) {
+            try {
+                actual = ModMeta.sha256(file);
+            } catch (IOException e) {
+                actual = "";
+            }
+        }
+        if (Files.exists(dst)) {
+            progress.warn("归档中已有 " + name + "，本次副本改放 " + TRASH_DIR);
+            moveToTrash(file, l.work());
+        } else {
+            Files.move(file, dst, StandardCopyOption.REPLACE_EXISTING);
+        }
+        result.archived++;
+        progress.info("归档玩家模组 " + cfg.targetDirName + "/" + name + " -> "
+                + AgentConfig.CONFIG_DIR + "/" + ARCHIVE_DIR + "/" + name);
+        appendRemovalLog(l, "archive", cfg.targetDirName + "/" + name, actual,
+                "玩家模组与服务器模组 modId 冲突，服务器版本优先", fingerprint);
+    }
+
+    private void appendRemovalLog(Layout l, String action, String path, String sha, String reason, String manifestHash) {
+        if (cfg.dryRun) {
+            return;
+        }
+        Map<String, Object> entry = Json.map();
+        entry.put("time", now());
+        entry.put("action", action);
+        entry.put("path", path);
+        entry.put("sha256", sha == null ? "" : sha);
+        entry.put("reason", reason);
+        entry.put("manifestHash", manifestHash == null ? "" : manifestHash);
         try {
-            return Files.size(file) == item.size() && ModMeta.sha256(file).equalsIgnoreCase(item.sha256());
+            Files.createDirectories(l.work());
+            Files.writeString(l.removalLog(), Json.writeCompact(entry) + "\n", StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (IOException e) {
-            return false;
+            progress.warn("无法写入 " + REMOVAL_LOG + ": " + e.getMessage());
+        }
+    }
+
+    private void writeHistory(Layout l, String body) {
+        try {
+            Path dir = l.history();
+            Files.createDirectories(dir);
+            Files.writeString(dir.resolve(HISTORY_STAMP.format(Instant.now()) + ".json"), body, StandardCharsets.UTF_8);
+            try (Stream<Path> stream = Files.list(dir)) {
+                List<Path> snapshots = stream
+                        .filter(Files::isRegularFile)
+                        .filter(p -> p.getFileName().toString().endsWith(".json"))
+                        .sorted(Comparator.comparing((Path p) -> p.getFileName().toString()).reversed())
+                        .toList();
+                for (int i = HISTORY_KEEP; i < snapshots.size(); i++) {
+                    Files.deleteIfExists(snapshots.get(i));
+                }
+            }
+        } catch (IOException e) {
+            progress.warn("无法写入 " + HISTORY_DIR + ": " + e.getMessage());
         }
     }
 
     /** Keeps the newest {@link #TRASH_KEEP} trash batches so the folder cannot grow forever. */
     private static void pruneTrash(Path work) {
-        Path trash = work.resolve("trash");
+        Path trash = work.resolve(TRASH_DIR);
         if (!Files.isDirectory(trash)) {
             return;
         }
@@ -544,64 +895,204 @@ public final class Syncer {
         }
     }
 
-    private boolean targetMatches(Path targetDir, Map<String, PlanItem> plan, State state) {
-        if (!Files.isDirectory(targetDir)) {
+    /** 同步成功后清空 tmp：只有失败的残片会留下。 */
+    private static void cleanTmp(Layout l) {
+        Path tmp = l.tmp();
+        if (!Files.isDirectory(tmp)) {
+            return;
+        }
+        try (Stream<Path> stream = Files.list(tmp)) {
+            for (Path p : stream.toList()) {
+                Files.deleteIfExists(p);
+            }
+        } catch (IOException ignored) {
+            // best effort
+        }
+    }
+
+    static void moveToTrash(Path file, Path work) throws IOException {
+        Path dir = work.resolve(TRASH_DIR).resolve(BATCH_STAMP.format(Instant.now()));
+        Files.createDirectories(dir);
+        Path dst = dir.resolve(file.getFileName().toString());
+        int i = 1;
+        while (Files.exists(dst)) {
+            dst = dir.resolve(file.getFileName().toString() + "." + i++);
+        }
+        Files.move(file, dst, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    // ------------------------------------------------------------------ 缓存与哈希
+
+    /** {@code (size,mtime)} 命中才复用记录：稳态启动不做全量哈希。 */
+    private static State.FileInfo cached(State.FileInfo rec, Path file) throws IOException {
+        if (rec == null) {
+            return null;
+        }
+        if (rec.size != Files.size(file) || rec.mtime != Files.getLastModifiedTime(file).toMillis()) {
+            return null;
+        }
+        return rec;
+    }
+
+    private static State.FileInfo stamp(Path file, String sha, String origin, String modId) throws IOException {
+        return new State.FileInfo(sha == null ? "" : sha, Files.size(file), origin,
+                Files.getLastModifiedTime(file).toMillis(), modId == null ? "" : modId);
+    }
+
+    private boolean ledgerMatches(Path file, String name, Desired d, State state) throws IOException {
+        long size = Files.size(file);
+        if (d.size() >= 0 && size != d.size()) {
             return false;
         }
-        Map<String, Path> have = listJarsMap(targetDir);
-        for (Map.Entry<String, PlanItem> e : plan.entrySet()) {
+        State.FileInfo rec = cached(state.serverFiles.get(name), file);
+        if (rec != null && !rec.sha256.isEmpty()) {
+            return rec.sha256.equalsIgnoreCase(d.sha256());
+        }
+        String sha = ModMeta.sha256(file);
+        state.serverFiles.put(name, stamp(file, sha, "server", rec == null ? "" : rec.modId));
+        return sha.equalsIgnoreCase(d.sha256());
+    }
+
+    private boolean modsMatches(Path file, String name, Desired d, State state) throws IOException {
+        if (!Files.isRegularFile(file)) {
+            return false;
+        }
+        long size = Files.size(file);
+        if (d.size() >= 0 && size != d.size()) {
+            return false;
+        }
+        State.FileInfo rec = cached(state.deployed.get(name), file);
+        if (rec != null && !rec.sha256.isEmpty()) {
+            return rec.sha256.equalsIgnoreCase(d.sha256());
+        }
+        String sha = ModMeta.sha256(file);
+        state.deployed.put(name, stamp(file, sha, originOf(state, name), rec == null ? "" : rec.modId));
+        return sha.equalsIgnoreCase(d.sha256());
+    }
+
+    /** {@code mods/<name>} 的内容是不是账本记录的那一份。 */
+    private boolean sameSha(Path file, String name, String sha, State state) throws IOException {
+        if (sha == null || sha.isEmpty() || !Files.isRegularFile(file)) {
+            return false;
+        }
+        State.FileInfo rec = cached(state.deployed.get(name), file);
+        if (rec != null && !rec.sha256.isEmpty()) {
+            return rec.sha256.equalsIgnoreCase(sha);
+        }
+        String actual = ModMeta.sha256(file);
+        state.deployed.put(name, stamp(file, actual, originOf(state, name), rec == null ? "" : rec.modId));
+        return actual.equalsIgnoreCase(sha);
+    }
+
+    private String modsSha(Path file, String name, State state) throws IOException {
+        State.FileInfo rec = cached(state.deployed.get(name), file);
+        if (rec != null && !rec.sha256.isEmpty()) {
+            return rec.sha256;
+        }
+        String sha = ModMeta.sha256(file);
+        state.deployed.put(name, stamp(file, sha, originOf(state, name), rec == null ? "" : rec.modId));
+        return sha;
+    }
+
+    private String ledgerSha(Path file, String name, State state) throws IOException {
+        State.FileInfo rec = cached(state.serverFiles.get(name), file);
+        if (rec != null && !rec.sha256.isEmpty()) {
+            return rec.sha256;
+        }
+        String sha = ModMeta.sha256(file);
+        state.serverFiles.put(name, stamp(file, sha, "server", rec == null ? "" : rec.modId));
+        return sha;
+    }
+
+    /** 账本文件里的 modId；用 {@code (size,mtime)} 缓存，避免每轮都开 zip。 */
+    private String ledgerModId(Path file, String name, State state) throws IOException {
+        State.FileInfo rec = cached(state.serverFiles.get(name), file);
+        if (rec != null && rec.modId != null && !rec.modId.isEmpty()) {
+            return rec.modId;
+        }
+        String id = normalizeId(ModMeta.readModId(file));
+        state.serverFiles.put(name, stamp(file, rec == null ? "" : rec.sha256, "server", id));
+        return id;
+    }
+
+    /** {@code mods/} 文件里的 modId；玩家文件同样按 {@code (size,mtime)} 缓存。 */
+    private String targetModId(Path file, String name, State state) throws IOException {
+        State.FileInfo rec = cached(state.deployed.get(name), file);
+        if (rec != null && rec.modId != null && !rec.modId.isEmpty()) {
+            return rec.modId;
+        }
+        String id = normalizeId(ModMeta.readModId(file));
+        state.deployed.put(name, stamp(file, rec == null ? "" : rec.sha256, originOf(state, name), id));
+        return id;
+    }
+
+    private static String originOf(State state, String name) {
+        return state.serverFiles.containsKey(name) ? "server" : "player";
+    }
+
+    private static String normalizeId(String id) {
+        if (id == null) {
+            return null;
+        }
+        String trimmed = id.trim().toLowerCase(Locale.ROOT);
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    /** 收尾重扫账本：保证 sha/modId 缓存与真实文件一致。 */
+    private void refreshServerFiles(Layout l, State state) {
+        Map<String, State.FileInfo> next = new LinkedHashMap<>();
+        for (Map.Entry<String, Path> e : listJarsMap(l.serverDir()).entrySet()) {
             String name = e.getKey();
-            PlanItem item = e.getValue();
-            Path p = have.get(name);
-            if (p == null) {
-                return false;
-            }
+            Path file = e.getValue();
             try {
-                if (Files.size(p) != item.size()) {
-                    return false;
+                State.FileInfo rec = cached(state.serverFiles.get(name), file);
+                String sha = rec != null && !rec.sha256.isEmpty() ? rec.sha256 : ModMeta.sha256(file);
+                String modId = rec == null ? null : rec.modId;
+                if (modId == null || modId.isEmpty()) {
+                    modId = normalizeId(ModMeta.readModId(file));
                 }
-                long mtime = Files.getLastModifiedTime(p).toMillis();
-                State.FileInfo deployed = state.deployed.get(name);
-                if (deployed != null && deployed.sha256.equalsIgnoreCase(item.sha256()) && deployed.mtime == mtime) {
-                    continue; // cheap path: unchanged since we deployed it
-                }
-                String actual = ModMeta.sha256(p);
-                if (!actual.equalsIgnoreCase(item.sha256())) {
-                    return false;
-                }
-                state.deployed.put(name, new State.FileInfo(actual, Files.size(p),
-                        deployed == null ? "" : deployed.origin, mtime));
+                next.put(name, stamp(file, sha, "server", modId));
             } catch (IOException ex) {
-                return false;
+                State.FileInfo old = state.serverFiles.get(name);
+                if (old != null) {
+                    next.put(name, old);
+                }
             }
         }
-        for (String name : have.keySet()) {
-            if (!plan.containsKey(name) && state.deployed.containsKey(name)) {
-                return false;
+        state.serverFiles.clear();
+        state.serverFiles.putAll(next);
+    }
+
+    /** 收尾重扫 {@code mods/}：服务器模组记 sha，玩家模组只记 modId，绝不重写文件。 */
+    private void refreshDeployed(Layout l, State state) {
+        Map<String, State.FileInfo> next = new LinkedHashMap<>();
+        for (Map.Entry<String, Path> e : listJarsMap(l.targetDir()).entrySet()) {
+            String name = e.getKey();
+            Path file = e.getValue();
+            String origin = originOf(state, name);
+            try {
+                State.FileInfo rec = cached(state.deployed.get(name), file);
+                String sha = rec == null || rec.sha256 == null ? "" : rec.sha256;
+                if (sha.isEmpty() && "server".equals(origin)) {
+                    sha = ModMeta.sha256(file);
+                }
+                String modId = rec == null ? null : rec.modId;
+                if (modId == null || modId.isEmpty()) {
+                    modId = normalizeId(ModMeta.readModId(file));
+                }
+                next.put(name, stamp(file, sha, origin, modId));
+            } catch (IOException ex) {
+                State.FileInfo old = state.deployed.get(name);
+                if (old != null) {
+                    next.put(name, old);
+                }
             }
         }
-        return true;
+        state.deployed.clear();
+        state.deployed.putAll(next);
     }
 
-    // ------------------------------------------------------------------ utilities
-
-    public static String humanBytes(long bytes) {
-        if (bytes < 0) {
-            return "?";
-        }
-        if (bytes < 1024) {
-            return bytes + " B";
-        }
-        double kb = bytes / 1024.0;
-        if (kb < 1024) {
-            return String.format(Locale.ROOT, "%.1f KB", kb);
-        }
-        double mb = kb / 1024.0;
-        if (mb < 1024) {
-            return String.format(Locale.ROOT, "%.1f MB", mb);
-        }
-        return String.format(Locale.ROOT, "%.2f GB", mb / 1024.0);
-    }
+    // ------------------------------------------------------------------ 扫描工具
 
     private static boolean matches(Path file, Desired desired) {
         try {
@@ -615,30 +1106,6 @@ public final class Syncer {
         } catch (IOException e) {
             return false;
         }
-    }
-
-    private static boolean sameContent(Path a, Path b) {
-        try {
-            return Files.size(a) == Files.size(b) && ModMeta.sha256(a).equals(ModMeta.sha256(b));
-        } catch (IOException e) {
-            return false;
-        }
-    }
-
-    private String modIdOf(Path jar, Map<String, String> cache) {
-        String key = jar.toString();
-        if (cache.containsKey(key)) {
-            return cache.get(key);
-        }
-        String id = ModMeta.readModId(jar);
-        if (id != null) {
-            id = id.trim().toLowerCase(Locale.ROOT);
-            if (id.isEmpty()) {
-                id = null;
-            }
-        }
-        cache.put(key, id);
-        return id;
     }
 
     private static List<Path> listJars(Path dir) {
@@ -676,49 +1143,33 @@ public final class Syncer {
         return !lower.endsWith(".disabled") && !lower.endsWith(".part") && !lower.endsWith(".tmp");
     }
 
-    static void moveToTrash(Path file, Path work) throws IOException {
-        Path dir = work.resolve("trash").resolve(TRASH_STAMP.format(Instant.now()));
-        Files.createDirectories(dir);
-        Path dst = dir.resolve(file.getFileName().toString());
-        int i = 1;
-        while (Files.exists(dst)) {
-            dst = dir.resolve(file.getFileName().toString() + "." + i++);
-        }
-        Files.move(file, dst, StandardCopyOption.REPLACE_EXISTING);
+    private static String modeVerb(String mode) {
+        return switch (mode) {
+            case "deploy" -> "补回";
+            case "update" -> "更新";
+            default -> "新增";
+        };
     }
 
-    private static Path uniqueName(Path dir, String name) {
-        String base = name;
-        String ext = "";
-        int dot = name.lastIndexOf('.');
-        if (dot > 0) {
-            base = name.substring(0, dot);
-            ext = name.substring(dot);
+    public static String humanBytes(long bytes) {
+        if (bytes < 0) {
+            return "?";
         }
-        for (int i = 2; i < 1000; i++) {
-            Path candidate = dir.resolve(base + "-modsync" + i + ext);
-            if (!Files.exists(candidate)) {
-                return candidate;
-            }
+        if (bytes < 1024) {
+            return bytes + " B";
         }
-        return dir.resolve(base + "-modsync-" + System.currentTimeMillis() + ext);
-    }
-
-    private static String fingerprint(String manifestHash, Map<String, PlanItem> plan) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            md.update((manifestHash == null ? "" : manifestHash).getBytes(StandardCharsets.UTF_8));
-            for (Map.Entry<String, PlanItem> e : plan.entrySet()) {
-                md.update((e.getKey() + ":" + e.getValue().size() + ":" + e.getValue().sha256() + "\n")
-                        .getBytes(StandardCharsets.UTF_8));
-            }
-            return ModMeta.hex(md.digest());
-        } catch (Exception e) {
-            return "";
+        double kb = bytes / 1024.0;
+        if (kb < 1024) {
+            return String.format(Locale.ROOT, "%.1f KB", kb);
         }
+        double mb = kb / 1024.0;
+        if (mb < 1024) {
+            return String.format(Locale.ROOT, "%.1f MB", mb);
+        }
+        return String.format(Locale.ROOT, "%.2f GB", mb / 1024.0);
     }
 
     private static String now() {
-        return DateTimeFormatter.ISO_INSTANT.format(Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
+        return DateTimeFormatter.ISO_INSTANT.format(Instant.now().truncatedTo(ChronoUnit.SECONDS));
     }
 }
