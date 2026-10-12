@@ -38,7 +38,7 @@ bash test/e2e-filter.sh
 FILTER_RC=$?
 
 echo
-echo "############ 5/6 reconcile suite (v1.2.0 对账模型) ############"
+echo "############ 5/6 reconcile suite (v1.2.0 同步模型) ############"
 bash test/e2e-reconcile.sh
 RECONCILE_RC=$?
 

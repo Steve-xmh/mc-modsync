@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# 对账式同步（v1.2.0 新模型）的端到端测试。
+# 同步式同步（v1.2.0 新模型）的端到端测试。
 #
-# 覆盖 docs/design-reconcile.md 的测试清单：
-#   T1  首次同步（无账本）→ 只增不删，玩家自装模组原封不动
-#   T2  幂等 → 已符合 N，需下载 0，mtime 不变
+# 覆盖 docs/design.md 的测试清单：
+#   T1  首次同步（无镜像）→ 只增不删，玩家自装模组原封不动
+#   T2  幂等 → 已一致 N，需下载 0，mtime 不变
 #   T3  服务器新增 → 只下载新增的那一个
 #   T4  玩家删掉客户端模组 → 不再复活（本次改造的核心验收）
 #   T5  玩家删掉服务器模组 → 被补回
 #   T6  玩家模组 modId 撞服务器 → 进 modsync/archive/，mods/ 只剩服务器版本
-#   T7  服务器删除模组 → 账本与 mods/ 同时移除，旧版进 trash，写 removal-log
-#   T8  服务器改名（同 modId 换文件名）→ 视为更新，不被护栏拦截
+#   T7  服务器删除模组 → 镜像与 mods/ 同时移除，旧版进 trash，写 removal-log
+#   T8  服务器改名（同 modId 换文件名）→ 视为更新，不被检查拦截
 #   T9  清单时间戳更旧/相同 → 只增改不删；更新后 → 正常删除
 #   T10 清单 files 为空 / JSON 损坏 → 本轮完全不动
 #   T11 服务器模组被改坏 → 复跑修复
@@ -62,7 +62,7 @@ cleanup() { [ -n "$HTTP_PID" ] && kill "$HTTP_PID" 2>/dev/null; wait "$HTTP_PID"
 trap cleanup EXIT
 
 make_mod() { bash "$ROOT/test/make-mod.sh" "$@" >/dev/null; }
-# 时间戳护栏要能被测试驱动：每次发布都用一个严格递增的时间戳
+# 时间戳检查要能被测试驱动：每次发布都用一个严格递增的时间戳
 regens=0
 LAST_TS=""
 regen() {
@@ -71,7 +71,7 @@ regen() {
   python3 "$ROOT/test/gen-manifest.py" --mods "$SRC" --out "$WWW" --base-url "$BASE" \
     --generated-at "$LAST_TS" "$@" >/dev/null
 }
-# 用与上次相同的 generatedAt 重新生成：内容一致 → 服务器返回 304；内容变了 → 顺序护栏生效
+# 用与上次相同的 generatedAt 重新生成：内容一致 → 服务器返回 304；内容变了 → 顺序检查生效
 regen_same() {
   python3 "$ROOT/test/gen-manifest.py" --mods "$SRC" --out "$WWW" --base-url "$BASE" \
     --generated-at "$LAST_TS" "$@" >/dev/null
@@ -103,22 +103,22 @@ for _ in $(seq 1 50); do curl -sf "$MANIFEST_URL" -o /dev/null && break; sleep 0
 if ! curl -sf "$MANIFEST_URL" -o /dev/null; then echo "静态服务器启动失败" >&2; cat "$WS/http.log" >&2; exit 1; fi
 
 # ---------------------------------------------------------------- T1 首次同步
-say "T1 首次同步（无账本）：只增不删，玩家模组原封不动"
+say "T1 首次同步（无镜像）：只增不删，玩家模组原封不动"
 SODIUM_MTIME="$(file_mtime "$SANDBOX/mods/sodium-player-1.0.jar")"
 run_agent "$WS/t1.log"
 assert_file_exists "$SANDBOX/mods/create-1.0.jar" "服务器模组已部署 create"
 assert_file_exists "$SANDBOX/mods/jei-1.0.jar" "服务器模组已部署 jei"
 assert_file_exists "$SANDBOX/mods/sodium-player-1.0.jar" "玩家自装模组仍在"
 assert_eq "$SODIUM_MTIME" "$(file_mtime "$SANDBOX/mods/sodium-player-1.0.jar")" "玩家模组文件未被触碰"
-assert_eq "2" "$(count_jars "$SANDBOX/mods-server")" "账本里只有服务器模组"
+assert_eq "2" "$(count_jars "$SANDBOX/mods-server")" "镜像里只有服务器模组"
 assert_file_exists "$SANDBOX/modsync/last-manifest.json" "已保存本地清单副本"
 
 # ---------------------------------------------------------------- T2 幂等
-say "T2 幂等：已符合、不重写"
+say "T2 幂等：已一致、不重写"
 CREATE_MTIME="$(file_mtime "$SANDBOX/mods/create-1.0.jar")"
 run_agent "$WS/t2.log"
-assert_eq "$CREATE_MTIME" "$(file_mtime "$SANDBOX/mods/create-1.0.jar")" "已符合文件未被重写（mtime 不变）"
-assert_log "$WS/t2.log" "已符合 2" "预检行报告 2 个文件已符合"
+assert_eq "$CREATE_MTIME" "$(file_mtime "$SANDBOX/mods/create-1.0.jar")" "已一致文件未被重写（mtime 不变）"
+assert_log "$WS/t2.log" "已一致 2" "预检行报告 2 个文件已一致"
 
 # ---------------------------------------------------------------- T3 服务器新增
 say "T3 服务器新增模组：只下载新增的那一个"
@@ -142,7 +142,7 @@ say "T5 玩家删掉服务器模组：下次启动被补回"
 rm -f "$SANDBOX/mods/create-1.0.jar"
 run_agent "$WS/t5.log"
 assert_file_exists "$SANDBOX/mods/create-1.0.jar" "服务器模组被补回"
-assert_same_content "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-1.0.jar" "补回内容与账本一致"
+assert_same_content "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-1.0.jar" "补回内容与镜像一致"
 assert_log "$WS/t5.log" "补回" "日志说明是补回"
 
 # ------------------------------------------------ T6 玩家 modId 与服务器冲突
@@ -164,24 +164,24 @@ assert_file_absent "$SANDBOX/mods/sodium-collide-1.0.jar" "冲突文件被移出
 assert_file_exists "$SANDBOX/modsync/archive/sodium-collide-1.0.jar" "冲突文件进了 archive"
 
 # ------------------------------------------------------- T7 服务器删除模组
-say "T7 服务器删掉模组：账本与 mods/ 同步移除，旧版进 trash"
+say "T7 服务器删掉模组：镜像与 mods/ 同步移除，旧版进 trash"
 rm -f "$SRC/apple-1.0.jar"
 regen
 run_agent "$WS/t7.log"
 assert_file_absent "$SANDBOX/mods/apple-1.0.jar" "mods/ 里已移除"
-assert_file_absent "$SANDBOX/mods-server/apple-1.0.jar" "账本里已移除"
+assert_file_absent "$SANDBOX/mods-server/apple-1.0.jar" "镜像里已移除"
 assert_log "$WS/t7.log" "服务器已删除" "日志说明是服务器删除"
 assert_file_exists "$SANDBOX/modsync/removal-log.jsonl" "写入了审计日志"
 
 # ------------------------------------------------------- T8 服务器改名/更新
-say "T8 服务器改名（同 modId）：视为更新，不被护栏拦截"
+say "T8 服务器改名（同 modId）：视为更新，不被检查拦截"
 mv "$SRC/create-1.0.jar" "$SRC/create-2.0.jar"
 regen
 run_agent "$WS/t8.log"
 assert_file_exists "$SANDBOX/mods/create-2.0.jar" "新文件就位"
 assert_file_absent "$SANDBOX/mods/create-1.0.jar" "旧文件已清除"
 assert_log "$WS/t8.log" "服务器更新" "日志标为更新"
-assert_no_log "$WS/t8.log" "本轮只增改" "没有被删除护栏误拦"
+assert_no_log "$WS/t8.log" "本轮只增改" "没有被删除检查误拦"
 
 say "T8b 时间戳未前进时服务器改名：仍必须落地（不能新旧并存）"
 mv "$SRC/sodium-1.0.jar" "$SRC/sodium-2.0.jar"
@@ -190,18 +190,18 @@ run_agent "$WS/t8b.log"
 assert_file_exists "$SANDBOX/mods/sodium-2.0.jar" "新文件就位"
 assert_file_absent "$SANDBOX/mods/sodium-1.0.jar" "旧文件被清除（时间戳没前进也一样）"
 
-# ---------------------------------------------------- T9 时间戳顺序护栏
+# ---------------------------------------------------- T9 时间戳顺序检查
 say "T9 清单时间戳更旧：只增改不删"
 rm -f "$SRC/jei-1.0.jar"
 regen_old
 run_agent "$WS/t9.log"
 assert_file_exists "$SANDBOX/mods/jei-1.0.jar" "时间戳不倒序 → 不执行删除"
-assert_log "$WS/t9.log" "本轮只增改，不删除" "日志说明了护栏生效"
+assert_log "$WS/t9.log" "本轮只增改，不删除" "日志说明了检查生效"
 say "T9b 时间戳前进：恢复删除"
 regen
 run_agent "$WS/t9b.log"
 assert_file_absent "$SANDBOX/mods/jei-1.0.jar" "时间戳前进后正常删除"
-assert_file_absent "$SANDBOX/mods-server/jei-1.0.jar" "账本同步移除"
+assert_file_absent "$SANDBOX/mods-server/jei-1.0.jar" "镜像同步移除"
 
 # ---------------------------------------------------- T10 空/坏清单
 say "T10 清单 files 为空 / JSON 损坏：本轮完全不动"
@@ -234,8 +234,8 @@ FIRST_JAR="$(ls -1 "$SRC"/*.jar | head -1)"
 MT_BEFORE="$(file_mtime "$GAME2/mods/$(basename "$FIRST_JAR")")"
 ( cd "$GAME2" && "$JAVA" -jar "$AGENT_JAR" --game-dir "$GAME2" --manifest-url "$MANIFEST_URL" ) >"$WS/t13.log" 2>&1
 assert_log "$WS/t13.log" "沿用" "沿用了本地已有的一致文件"
-assert_log "$WS/t13.log" "完成: 校验 ${SERVER_COUNT}，下载 0，移除 0，归档 0，补齐 0" "零下载、零归档完成首次对账"
-assert_eq "${SERVER_COUNT}" "$(count_jars "$GAME2/mods-server")" "账本被完整填充"
+assert_log "$WS/t13.log" "完成: 一致 ${SERVER_COUNT}，下载 0，移除 0，归档 0，补回 0" "零下载、零归档完成首次同步"
+assert_eq "${SERVER_COUNT}" "$(count_jars "$GAME2/mods-server")" "镜像被完整填充"
 assert_eq "${MT_BEFORE}" "$(file_mtime "$GAME2/mods/$(basename "$FIRST_JAR")")" "内容一致的文件未被重写"
 assert_file_absent "$GAME2/modsync/archive" "没有把内容一致的文件误当冲突归档"
 assert_file_exists "$GAME2/mods/mymod-player-1.0.jar" "玩家自己的模组未被触碰"

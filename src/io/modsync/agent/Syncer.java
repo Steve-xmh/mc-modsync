@@ -40,22 +40,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 /**
- * 增量对账式同步（v1.2.0，规格见 {@code docs/design-reconcile.md}）。
+ * 增量同步（v1.2.0，规格见 {@code docs/design.md}）。
  *
- * <p>{@code mods/} 是玩家真实生效目录，{@code mods-server/} 是服务端镜像（账本），清单是权威内容。
+ * <p>{@code mods/} 是玩家真实生效目录，{@code mods-server/} 是服务端镜像，清单是权威内容。
  * 一次同步固定按下面的顺序走：
  *
  * <ol>
  *   <li>拉取清单（304 感知），判定清单是否有效、是否允许删除；</li>
- *   <li>计划：diff（清单 ↔ 账本）+ {@code mods/} 补齐扫描 + 玩家碰撞扫描；</li>
+ *   <li>计划：diff（清单 ↔ 镜像）+ {@code mods/} 补回扫描 + 玩家碰撞扫描；</li>
  *   <li>下载全部需要的新文件到 {@code modsync/tmp/} 并逐个校验 sha；</li>
- *   <li>REMOVE（先从 {@code mods/} 与账本里删，避免出现两个同 modId 的 jar）；</li>
+ *   <li>REMOVE（先从 {@code mods/} 与镜像里删，避免出现两个同 modId 的 jar）；</li>
  *   <li>RENAME / EVICT（旧版进 trash，玩家版进 archive）；</li>
- *   <li>ADD / UPDATE / DEPLOY（tmp → 原子 move 进 {@code mods/}，随后更新账本）；</li>
+ *   <li>ADD / UPDATE / DEPLOY（tmp → 原子 move 进 {@code mods/}，随后更新镜像）；</li>
  *   <li>写 last-manifest / history / state / removal-log，校验扫描并汇总。</li>
  * </ol>
  *
- * <p>不变量：删除只能由账本差集驱动；{@code mods/} 里不在账本、modId 也不冲突的文件永不触碰；
+ * <p>不变量：删除只能由镜像差集驱动；{@code mods/} 里不在镜像、modId 也不冲突的文件永不触碰；
  * 服务器模组不进 archive；清单不可信时本轮完全不动。
  */
 public final class Syncer {
@@ -84,7 +84,7 @@ public final class Syncer {
     /** 最近一次失败原因（仅用于日志），不参与判定。 */
     public static final class Result {
         public boolean manifestFetched;
-        /** 账本里已符合清单、无需下载的文件数。 */
+        /** 镜像里与清单一致、无需下载的文件数。 */
         public int verified;
         public int downloaded;
         /** 因清单里路径消失（且 modId 也不在清单）而删除的服务器模组数。 */
@@ -271,8 +271,8 @@ public final class Syncer {
             state.etag = manifest.etag;
         }
 
-        // ---------------------------------------------------------- 3. 计划：账本预检
-        progress.phase("对账 " + cfg.serverDirName);
+        // ---------------------------------------------------------- 3. 计划：镜像预检
+        progress.phase("同步 " + cfg.serverDirName);
         Map<String, Path> ledger = listJarsMap(l.serverDir());
         Map<String, String> ledgerSha = new LinkedHashMap<>();
         Set<String> ledgerOk = new HashSet<>();
@@ -289,8 +289,8 @@ public final class Syncer {
                 continue;
             }
             if (modsMatches(l.targetDir().resolve(name), name, e.getValue(), state)) {
-                // mods/ 里已经有内容完全一致的文件：玩家自己装过整套模组、或删过账本。
-                // 直接用它填账本——既不重新下载那几百 MB，也不该把它当成"玩家模组"归档。
+                // mods/ 里已经有内容完全一致的文件：玩家自己装过整套模组、或删过镜像。
+                // 直接用它填镜像——既不重新下载那几百 MB，也不该把它当成"玩家模组"归档。
                 ledgerOk.add(name);
                 ledgerSha.put(name, e.getValue().sha256());
                 adopted.add(name);
@@ -298,7 +298,7 @@ public final class Syncer {
                 continue;
             }
             if (file != null) {
-                // 旧账本内容的 sha：决定 mods/ 里的同名文件是服务器旧版（进 trash）还是玩家的（进 archive）
+                // 旧镜像内容的 sha：决定 mods/ 里的同名文件是服务器旧版（进 trash）还是玩家的（进 archive）
                 ledgerSha.put(name, ledgerSha(file, name, state));
             }
             pending.add(e);
@@ -308,7 +308,7 @@ public final class Syncer {
             progress.info("沿用 " + cfg.targetDirName + "/ 里已有的 " + adopted.size()
                     + " 个文件（内容与清单一致，未重复下载）");
         }
-        progress.info("校验 " + cfg.serverDirName + ": 已符合 " + result.verified + " 个"
+        progress.info("检查 " + cfg.serverDirName + ": 已一致 " + result.verified + " 个"
                 + (pending.isEmpty() ? "" : "，需下载 " + pending.size() + " 个 (" + humanBytes(pendingBytes) + ")"));
 
         // ---------------------------------------------------------- 3b. 下载（先全部落到 tmp 并校验）
@@ -330,7 +330,7 @@ public final class Syncer {
         }
 
         // ---------------------------------------------------------- 3c. 计划：REMOVE / RENAME / EVICT
-        progress.phase("对账 " + cfg.targetDirName);
+        progress.phase("同步 " + cfg.targetDirName);
         Map<String, Path> modsFiles = listJarsMap(l.targetDir());
         Set<String> manifestModIds = new HashSet<>();
         Map<String, String> manifestNameByModId = new LinkedHashMap<>();
@@ -363,7 +363,7 @@ public final class Syncer {
         List<String> evictions = new ArrayList<>();
         for (Map.Entry<String, Path> e : modsFiles.entrySet()) {
             if (ledger.containsKey(e.getKey()) || desired.containsKey(e.getKey())) {
-                // 账本里的文件由对账处理；名字本身就是清单条目的（无论内容是否一致）由安装流程
+                // 镜像里的文件由同步处理；名字本身就是清单条目的（无论内容是否一致）由安装流程
                 // 负责替换或沿用，不该再被当成"玩家的模组"归档一次。
                 continue;
             }
@@ -422,7 +422,7 @@ public final class Syncer {
                 if (sameSha(inMods, oldName, sha, state)) {
                     moveToTrash(inMods, l.work());
                 } else {
-                    // sha 传空：归档日志要记玩家那份的真实 sha，而不是账本旧版的
+                    // sha 传空：归档日志要记玩家那份的真实 sha，而不是镜像旧版的
                     archivePlayer(inMods, oldName, l, fingerprint, "", result);
                 }
             }
@@ -461,7 +461,7 @@ public final class Syncer {
         }
 
         if (!cfg.dryRun && !adopted.isEmpty()) {
-            // 账本里还没有这些文件，用 mods/ 里的同一份内容补上（不联网）
+            // 镜像里还没有这些文件，用 mods/ 里的同一份内容补上（不联网）
             for (String name : adopted) {
                 putLedger(l, name, l.targetDir().resolve(name), desired.get(name), state);
             }
@@ -495,7 +495,7 @@ public final class Syncer {
             if (deploy) {
                 progress.info("补回 " + cfg.targetDirName + "/" + name);
                 appendRemovalLog(l, "deploy", cfg.targetDirName + "/" + name, d.sha256(),
-                        "mods/ 缺失或被改动，从账本补回", fingerprint);
+                        "mods/ 缺失或被改动，从镜像补回", fingerprint);
             } else {
                 putLedger(l, name, source, d, state);
                 if ("update".equals(mode)) {
@@ -525,8 +525,8 @@ public final class Syncer {
             cleanTmp(l);
             state.save(l.stateFile());
         }
-        progress.info("完成: 校验 " + result.verified + "，下载 " + result.downloaded + "，移除 " + result.removed
-                + "，归档 " + result.archived + "，补齐 " + result.deployed);
+        progress.info("完成: 一致 " + result.verified + "，下载 " + result.downloaded + "，移除 " + result.removed
+                + "，归档 " + result.archived + "，补回 " + result.deployed);
     }
 
     /** 清单为空/坏/拉不动：本轮完全不动（不删也不加），非 strict 时照常启动。 */
@@ -539,10 +539,10 @@ public final class Syncer {
         }
     }
 
-    // ------------------------------------------------------------------ 删除护栏
+    // ------------------------------------------------------------------ 删除检查
 
     /**
-     * 四条护栏，全满足才允许删除。
+     * 删除条件，四条全满足才允许删除。
      *
      * @return {@code null} 表示允许删除，否则是拒绝原因
      */
@@ -551,7 +551,7 @@ public final class Syncer {
             return "服务器标识与本地记录不同或首次同步";
         }
         if (cfg.forceSync) {
-            progress.info("已按 --force-sync 忽略清单 generatedAt 顺序护栏");
+            progress.info("已按 --force-sync 忽略清单 generatedAt 顺序检查");
         } else {
             Instant previous = parseInstant(state.manifestGeneratedAt);
             Instant current = parseInstant(manifest.generatedAt);
@@ -808,7 +808,7 @@ public final class Syncer {
         }
     }
 
-    /** 把新内容写进账本（旧账本文件进 trash）。 */
+    /** 把新内容写进镜像（旧镜像文件进 trash）。 */
     private void putLedger(Layout l, String name, Path source, Desired d, State state) throws IOException {
         Path dst = l.serverDir().resolve(name);
         if (!source.equals(dst)) {
@@ -993,7 +993,7 @@ public final class Syncer {
         return sha.equalsIgnoreCase(d.sha256());
     }
 
-    /** {@code mods/<name>} 的内容是不是账本记录的那一份。 */
+    /** {@code mods/<name>} 的内容是不是镜像记录的那一份。 */
     private boolean sameSha(Path file, String name, String sha, State state) throws IOException {
         if (sha == null || sha.isEmpty() || !Files.isRegularFile(file)) {
             return false;
@@ -1027,7 +1027,7 @@ public final class Syncer {
         return sha;
     }
 
-    /** 账本文件里的 modId；用 {@code (size,mtime)} 缓存，避免每轮都开 zip。 */
+    /** 镜像文件里的 modId；用 {@code (size,mtime)} 缓存，避免每轮都开 zip。 */
     private String ledgerModId(Path file, String name, State state) throws IOException {
         State.FileInfo rec = cached(state.serverFiles.get(name), file);
         if (rec != null && rec.modId != null && !rec.modId.isEmpty()) {
@@ -1061,7 +1061,7 @@ public final class Syncer {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    /** 收尾重扫账本：保证 sha/modId 缓存与真实文件一致。 */
+    /** 收尾重扫镜像：保证 sha/modId 缓存与真实文件一致。 */
     private void refreshServerFiles(Layout l, State state) {
         Map<String, State.FileInfo> next = new LinkedHashMap<>();
         for (Map.Entry<String, Path> e : listJarsMap(l.serverDir()).entrySet()) {

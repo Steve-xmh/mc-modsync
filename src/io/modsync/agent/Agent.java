@@ -122,7 +122,7 @@ public final class Agent {
 
     private static void usage(PrintStream out) {
         out.println("""
-                ModSync client agent — 在游戏启动前把 mods 目录增量对账到服务器状态
+                ModSync client agent — 在游戏启动前把 mods 目录增量同步到服务器状态
 
                 用法:
                   java -jar modsync-agent.jar [选项]                 # Prism/MultiMC 预启动命令
@@ -132,10 +132,10 @@ public final class Agent {
                   --manifest-url <url>   服务器清单地址（必填，或用 -Dmodsync.manifestUrl=）
                   --game-dir <dir>       .minecraft 目录，默认当前工作目录（或用 -Dmodsync.gameDir=）
                   --config <file>        指定配置文件，默认 <gameDir>/modsync/config.json
-                  --server-dir <name>    服务端镜像（账本）目录名，默认 mods-server
+                  --server-dir <name>    服务端镜像目录名，默认 mods-server
                   多个参数用逗号分隔，例如 -javaagent:modsync-agent.jar=--manifest-url=...,--strict=false
                   （切勿把 --xxx 当独立 JVM 参数写，JVM 会因为不认识的选项拒绝启动游戏）
-                  --force-sync           忽略清单时间戳护栏（服务器回滚清单时用）
+                  --force-sync           忽略清单时间戳检查（服务器回滚清单时用）
                   --dry-run              只打印将要执行的操作，不改动任何文件
                   --strict               同步失败时中止游戏启动（默认仅告警后继续）
                   --parallel <n>         并行下载数，默认 4
@@ -150,8 +150,8 @@ public final class Agent {
                   --help                 显示本帮助
 
                 目录模型:
-                  mods/         玩家真实生效目录：服务器模组 + 玩家自装模组，agent 只按对账规则改动
-                  mods-server/  账本 = 服务端镜像，agent 私有目录，请勿手动维护
+                  mods/         玩家真实生效目录：服务器模组 + 玩家自装模组，agent 只按同步规则改动
+                  mods-server/  服务端模组镜像，agent 私有目录，请勿手动维护
                   modsync/archive/   被服务器版本顶掉的玩家模组（永不自动放回）
                   modsync/trash/     服务器模组旧版本的短期回收（保留最近 10 批）
                 """);

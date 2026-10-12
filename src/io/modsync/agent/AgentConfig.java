@@ -20,7 +20,7 @@ public final class AgentConfig {
     public String serverDirName = "mods-server";
     public String targetDirName = "mods";
     public boolean strict = false;
-    /** 忽略清单 generatedAt 顺序护栏（`--force-sync`）。 */
+    /** 忽略清单 generatedAt 顺序检查（`--force-sync`）。 */
     public boolean forceSync = false;
     public boolean dryRun = false;
     public boolean verbose = false;

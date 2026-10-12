@@ -10,9 +10,9 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 持久化的 agent 状态：清单指纹/ETag、上次应用的 {@code generatedAt}、账本快照与 {@code mods/} 缓存。
+ * 持久化的 agent 状态：清单指纹/ETag、上次应用的 {@code generatedAt}、镜像快照与 {@code mods/} 缓存。
  *
- * <p>v1.2.0 起它是「缓存 + 审计」，不再是唯一真源：真源是服务器清单与 {@code mods-server/} 账本目录。
+ * <p>v1.2.0 起它是「缓存 + 审计」，不再是唯一真源：真源是服务器清单与 {@code mods-server/} 镜像目录。
  */
 public final class State {
 
@@ -22,7 +22,7 @@ public final class State {
     public String manifestHash = "";
     public String etag = "";
     public String lastSyncAt = "";
-    /** 上次成功应用清单的 {@code generatedAt}（删除护栏的时间戳依据）。 */
+    /** 上次成功应用清单的 {@code generatedAt}（删除检查的时间戳依据）。 */
     public String manifestGeneratedAt = "";
     /** name -> info, the desired contents of {@code mods-server}. */
     public final Map<String, FileInfo> serverFiles = new LinkedHashMap<>();

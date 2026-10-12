@@ -97,7 +97,7 @@ if ! curl -sf "$BASE/manifest.json" -o /dev/null; then
 fi
 
 # ---------------------------------------------------------------- T1 首次同步
-say "T1 首次同步：服务器模组进账本并部署到 mods/"
+say "T1 首次同步：服务器模组进镜像并部署到 mods/"
 run_agent "$WS/t1.log"
 assert_eq "0" "$?" "agent 退出码为 0"
 assert_contains "$WS/t1.log" "下载 2" "下载了 2 个文件"
@@ -111,9 +111,9 @@ MTIME_BEFORE="$(file_mtime "$SANDBOX/mods-server/create-1.0.jar")"
 say "T2 再次运行：符合的文件不重写（稳态）"
 run_agent "$WS/t2.log"
 assert_eq "0" "$?" "agent 退出码为 0"
-assert_contains "$WS/t2.log" "已符合 2 个" "识别出 2 个文件已符合"
-assert_contains "$WS/t2.log" "完成: 校验 2，下载 0，移除 0，归档 0，补齐 0" "稳态下不做任何改动"
-assert_eq "$MTIME_BEFORE" "$(file_mtime "$SANDBOX/mods-server/create-1.0.jar")" "已符合文件未被重写（mtime 不变）"
+assert_contains "$WS/t2.log" "已一致 2 个" "识别出 2 个文件已一致"
+assert_contains "$WS/t2.log" "完成: 一致 2，下载 0，移除 0，归档 0，补回 0" "稳态下不做任何改动"
+assert_eq "$MTIME_BEFORE" "$(file_mtime "$SANDBOX/mods-server/create-1.0.jar")" "已一致文件未被重写（mtime 不变）"
 
 # ---------------------------------------------------------------- T3 client 模组共存
 say "T3 玩家自装模组：直接放在 mods/ 里，永不被触碰"
@@ -157,7 +157,7 @@ assert_contains "$WS/t6.log" "下载 1" "只下载 1 个变化文件"
 assert_same_content "$SANDBOX/mods/create-1.0.jar" "$SANDBOX/mods-server/create-1.0.jar" "mods 同步到新版本"
 
 # ---------------------------------------------------------------- T7 服务器删除
-say "T7 服务器删除模组：账本与 mods/ 同步移除，旧版进 trash"
+say "T7 服务器删除模组：镜像与 mods/ 同步移除，旧版进 trash"
 rm -f "$SRC/sodium-1.0.jar"
 regen
 run_agent "$WS/t7.log"
@@ -178,7 +178,7 @@ regen
 run_agent "$WS/t8.log" --dry-run
 assert_contains "$WS/t8.log" "[dry-run]" "输出 dry-run 计划"
 assert_file_absent "$SANDBOX/mods/pending-1.0.jar" "dry-run 不写 mods/"
-assert_file_absent "$SANDBOX/mods-server/pending-1.0.jar" "dry-run 不写账本"
+assert_file_absent "$SANDBOX/mods-server/pending-1.0.jar" "dry-run 不写镜像"
 assert_eq "3" "$(count_jars "$SANDBOX/mods")" "mods 未被改动"
 rm -f "$SRC/pending-1.0.jar"
 
@@ -203,7 +203,7 @@ run_agent "$WS/t9b.log"
 assert_contains "$WS/t9b.log" "下载 1" "检出哈希不匹配并重新下载"
 assert_same_content "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-1.0.jar" "修复后 mods 与 mods-server 一致"
 
-say "T9c 只有账本被改坏（mods/ 那份是对的）：用本地文件修账本，不联网"
+say "T9c 只有镜像被改坏（mods/ 那份是对的）：用本地文件修镜像，不联网"
 python3 - "$SANDBOX/mods-server/create-1.0.jar" <<'PY'
 import sys
 p = sys.argv[1]
@@ -212,9 +212,9 @@ data[-1] ^= 0xFF
 open(p, "wb").write(bytes(data))
 PY
 run_agent "$WS/t9c.log"
-assert_contains "$WS/t9c.log" "沿用" "用 mods/ 里内容一致的文件补账本"
+assert_contains "$WS/t9c.log" "沿用" "用 mods/ 里内容一致的文件补镜像"
 assert_contains "$WS/t9c.log" "下载 0" "没有重复下载"
-assert_same_content "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-1.0.jar" "账本被修复"
+assert_same_content "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-1.0.jar" "镜像被修复"
 
 # ---------------------------------------------------------------- T10 -javaagent
 say "T10 -javaagent 模式（PCL 等直接改 JVM 参数）"
