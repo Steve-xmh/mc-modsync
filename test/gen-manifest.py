@@ -57,6 +57,8 @@ def main() -> int:
     ap.add_argument("--loader-version", default=None,
                     help="optional loader version announced to clients")
     ap.add_argument("--loader-type", default="neoforge")
+    ap.add_argument("--generated-at", default="2026-10-08T00:00:00.000Z",
+                    help="manifest 'generatedAt' (ISO-8601)；用于测试时间戳顺序护栏")
     args = ap.parse_args()
 
     files_dir = os.path.join(args.out, "files")
@@ -89,7 +91,7 @@ def main() -> int:
         "schema": 1,
         "packName": args.pack_name,
         "serverId": args.server_id,
-        "generatedAt": "2026-10-08T00:00:00Z",
+        "generatedAt": args.generated_at,
         "baseUrl": args.base_url.rstrip("/"),
         "files": entries,
     }

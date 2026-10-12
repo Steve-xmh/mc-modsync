@@ -58,8 +58,13 @@ public final class SyncServer implements AutoCloseable {
     /** Path prefix every route lives under. */
     public static final String PREFIX = "/modsync";
 
+    /**
+     * Millisecond precision on purpose: clients use this as an ordering guard before deleting
+     * anything, and a second-precision stamp makes two regenerations in the same second compare
+     * equal (which the client treats as "no new information").
+     */
     private static final DateTimeFormatter TIMESTAMP =
-            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
+            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int HTTP_THREADS = 8;

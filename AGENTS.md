@@ -7,8 +7,8 @@
 ModSync：给 Minecraft **NeoForge 1.21.1** 服务器用的模组同步方案。
 
 - 服务端只需要装一个 NeoForge 模组：启动时向 FML 读取**实际加载的模组文件**，发布成一份 JSON 清单，公开一个 HTTP 端口（也可用独立进程形态扫目录）；
-- 客户端 agent 在**游戏启动前**校验/增量下载，然后把 `mods/` 目录重组出来；
-- 玩家自己装在 `mods-client/` 的模组永不被删改；同 mod id 冲突时服务器版本优先。
+- 客户端 agent 在**游戏启动前**把 `mods/` 增量对账到服务器状态（不整目录重组）；
+- `mods/` 里玩家自装、且 mod id 不与服务器冲突的模组**永不被触碰**；冲突时服务器版本优先，玩家那份进 `modsync/archive/`。
 
 ## 仓库结构
 
@@ -51,8 +51,8 @@ bash test/e2e-filter.sh              # 也可以单独跑任意一套
 这些不是风格偏好，破坏它们会造成真实事故：
 
 1. **零第三方依赖。** 两个 jar 只允许用 JDK（`java.net.http`、`com.sun.net.httpserver`、`java.util.zip`…）。不要引入 Gson/Netty/Guava，也不要引入 Gradle 工程；模组编译靠 `build-mod.sh` 对着本地依赖 javac。
-2. **玩家的文件不可删。** `mods-client/` 只读；只有 `state.json` 里记录为 agent 自己部署过的文件才允许动；替换/删除一律先进 `modsync/trash/`。玩家误丢进 `mods/` 的 jar 是**迁移**到 `mods-client/`，不是删除。
-3. **同 mod id 冲突：服务器优先。** 客户端版本保留在 `mods-client/`，但不参与重组。
+2. **玩家的文件不可删。** `mods/` 里不在账本、且 mod id 不与清单冲突的 jar 一律不触碰；删除只能由**账本差集**驱动（绝不能由「`mods/` 里多出来的文件」驱动）；被顶掉的玩家版本进 `modsync/archive/`，服务器旧版进 `modsync/trash/`。
+3. **同 mod id 冲突：服务器优先。** 玩家版本移入 `modsync/archive/`（可手动恢复），绝不自动放回 `mods/`。
 4. **协议向后兼容。** `schema` 保持 `1`，新字段必须是可选的（如 `minecraft`、`loader`）；老客户端遇到不认识的字段要能忽略。改协议必须同步更新 `docs/protocol.md`。
 5. **发布器永不发布自己。** 两种形态都靠运行时拿自身 jar 文件名排除（模组用反射，独立进程用 `CodeSource`）；默认 glob 只是兜底，不要删。
 6. **服务端的发布源是「FML 实际加载的模组」**（`publishLoadedMods`，`ModSyncMod.loadedModFiles()` 反射读 `ModList`），
@@ -76,8 +76,8 @@ bash test/e2e-filter.sh              # 也可以单独跑任意一套
 
 - **`@Mod.dist` 是数组且默认 `{CLIENT, DEDICATED_SERVER}`**：不写 `dist` = 双端；显式写两个值也是双端。别把"代码里出现 `DEDICATED_SERVER`"当成服务端专属（`ModEnv` 用注解解析就是为了避免这个误判）。
 - **glob 转成正则时必须转义**：`SyncServer.globPattern` 用 `Pattern.quote`，新增匹配逻辑要保持。
-- **`state.json` 的 `mtime` 快速路径**：目标文件大小 + 已记录 sha + mtime 都对上才跳过哈希；改动重组逻辑时别把这条捷径弄丢，否则每次启动都会全量哈希。
-- **`trash/` 只保留最近 `TRASH_KEEP` 批**，且内容未变的文件要原地保留（否则每次重组都产生垃圾）。
+- **`state.json` 的 `mtime` 快速路径**：文件大小 + 已记录 sha + mtime 都对上才跳过哈希；改动对账/校验逻辑时别把这条捷径弄丢，否则每次启动都会全量哈希。
+- **`trash/` 只保留最近 `TRASH_KEEP` 批**，内容未变的文件要原地保留（否则每次对账都产生垃圾）；**服务器模组不进 `archive/`**（缺了重新下载），`archive/` 只放玩家模组。
 - **网络环境可能很慢/有代理**：Modrinth 查询的连接超时已放宽到 15 秒且失败只告警一次；Forge/NeoForge 官方安装器把超时硬编码成 5 秒（`sipush 5000`），在网络慢的环境必然失败——`docs/deploy.md` 的排查表里有记录，`build-mod.sh` 不用 Gradle 也是为了绕开它。
 - **测试可移植性**：不要用 `stat -f`（BSD）或 `find -quit`；用测试里的 `file_mtime` / `file_size` / `has_file` 助手。
 - **`set -o pipefail` 下别把 `外部命令 | grep -q` 当断言**：`grep -q` 命中即退出会让左端收到 SIGPIPE（退出码 141），整条管道被判失败，而且只在输出够大时才稳定复现。先把输出落到文件再匹配（`build-mod.sh` 的产物断言就是这么写的）。

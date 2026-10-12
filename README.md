@@ -3,12 +3,12 @@
 [![CI](https://github.com/Steve-xmh/mc-modsync/actions/workflows/ci.yml/badge.svg)](https://github.com/Steve-xmh/mc-modsync/actions/workflows/ci.yml)
 [![License: 未指定](https://img.shields.io/badge/license-未指定-lightgrey)](#许可证)
 
-给 Minecraft **NeoForge 1.21.1** 服务器用的一套模组同步方案：**服务器公开一个端口提供摘要清单和文件下载，客户端在游戏启动前完成校验与增量下载，然后把 `mods` 目录重组成最终状态再进游戏。**
+给 Minecraft **NeoForge 1.21.1** 服务器用的一套模组同步方案：**服务器公开一个端口提供摘要清单和文件下载，客户端在游戏启动前完成校验与增量下载，然后以**增量对账**的方式把 `mods/` 对齐到服务器状态再进游戏。**
 
 针对现有方案（AutoModpack 等）的差异点：
 
 - **真正的启动前同步**：同步发生在 Minecraft 主类加载之前（`-javaagent` 或 Prism 预启动命令），不存在「进服务器才下载、下载完还得重启」的循环。
-- **玩家自装模组是一等公民**：`mods-client/` 只读、绝不被同步逻辑删除或覆盖；同 mod id 冲突时**服务器版本优先**，玩家那份保留在 `mods-client/` 里。
+- **玩家自装模组是一等公民**：你自己的模组直接放在 `mods/` 里，只要 mod id 不与服务器冲突就**永不被 agent 触碰**；冲突时服务器版本优先，你那份移入 `modsync/archive/`，随时可以手动放回。
 - **服务端只需要装一个模组**：模组启动时直接读取 FML **实际加载**的模组文件作为发布源（`publishLoadedMods`），完全不依赖目录布局；端口、排除规则等都在 `config/modsync-server.json` 里改。
 - **自动过滤纯服务端模组**：性能/管理类的服务端专属模组不会推给玩家（识别 Fabric `environment: server`、NeoForge `@Mod(dist=DEDICATED_SERVER)`——真解析 class 注解，不会把「代码里引用了 Dist 的双端模组」误判）。
 - **发布器永远不会把自己发给玩家**：模组形态与独立进程形态都在运行时排除自身 jar（**改了文件名字也不会漏**），默认 glob 只是兜底。
@@ -20,17 +20,31 @@
 
 ```
 .minecraft/
-├── mods/           构建产物：agent 每次按需清空并重组，请勿手动维护
-├── mods-server/    与服务器清单完全一致（agent 拥有：增/删/改）
-├── mods-client/    玩家自己安装的模组（agent 只读，绝不动）
+├── mods/           你（和启动器）真正使用的目录：服务器模组 + 你自己的模组
+├── mods-server/    账本：与服务器清单一致（agent 私有，请勿手动改动）
 └── modsync/
-    ├── config.json 客户端配置（清单地址等）
-    ├── state.json  同步状态（serverId / ETag / 已部署文件 + sha256 + mtime）
-    └── trash/      被替换或移除的文件的回收站，可随时删除
+    ├── config.json          客户端配置（清单地址等）
+    ├── state.json           同步状态（serverId / ETag / 清单指纹 / 已部署文件 + sha256 + mtime）
+    ├── last-manifest.json   上次成功应用的服务器清单（交叉比对与时间戳判定用）
+    ├── manifest-history/    历史清单（只留 JSON，最多 5 份）
+    ├── archive/             因 mod id 冲突被你顶掉的服务器版本、或你的版本被服务器顶掉时的备份
+    ├── trash/               服务器模组旧版本/删除件的短期回收（最近 10 批）
+    └── removal-log.jsonl    每次增删改的审计记录
 ```
 
-重组规则：`mods/` = `mods-server/` 的全部 jar ∪ `mods-client/` 中 mod id 不与服务器冲突的 jar；
-玩家误丢进 `mods/` 的 jar 会被**迁移**到 `mods-client/`（而不是随重组被删）。
+**对账规则**（agent 只在「服务器清单」与「`mods-server/` 账本」之间算差异，再把同一串增删改作用到 `mods/`）：
+
+| 情况 | 结果 |
+| --- | --- |
+| 清单里有、账本里没有 | 下载并放进 `mods/` |
+| 同路径但 sha 变了 | 更新（= 删旧 + 加新），`mods/` 里换成新版本 |
+| 账本里有、新清单里没有 | 服务器删除了它 → 从账本与 `mods/` 同时移除（旧版进 `trash/`） |
+| 同 mod id 但换了文件名 | 视为更新，先清除旧的再放新的，不会出现两个同 id 的 jar |
+| `mods/` 里有、账本里没有、mod id 也不冲突 | **这是你自己的模组，永远不碰** |
+| `mods/` 里有、mod id 与服务器冲突 | 服务器版本优先，你那份移入 `modsync/archive/` |
+| 清单不可信（拉取失败 / JSON 损坏 / `files` 为空 / 时间戳倒退 / 无本地清单） | **本轮完全不动**，照常启动 |
+
+> 关键点：**`mods/` 里"多出来的文件"永远不会被当成服务器删除的模组** —— 删除只能来自账本差集。
 
 ## 快速开始
 
@@ -106,10 +120,9 @@ java -jar modsync-server.jar \
 {
   "manifestUrl": "http://play.example.com:25566/modsync/manifest.json",
   "serverDir": "mods-server",
-  "clientDir": "mods-client",
   "targetDir": "mods",
   "strict": false,
-  "autoMigrateUnknownMods": true,
+  "forceSync": false,        // true：忽略清单时间戳的顺序护栏
   "forceRebuild": false,
   "timeoutSeconds": 30,
   "parallelDownloads": 4
@@ -160,12 +173,12 @@ java -jar modsync-agent.jar --game-dir /path/to/.minecraft --manifest-url http:/
 | 本地文件 sha256 与清单一致 | **不重写、不下载**（mtime 保持不变） |
 | 文件中缺失 / 哈希不符 | 下载到 `.part` 校验后原子改名进 `mods-server/` |
 | 清单提供 `url` 直链 | 优先走直链，仍以清单 sha256 校验 |
-| 服务器删除了模组 | 本地副本移入 `modsync/trash/`，并触发重组 |
+| 服务器删除了模组 | 从 `mods-server/` 与 `mods/` 同时移除，旧版进 `modsync/trash/` |
 | 服务器换了 serverId | 视为换服，清空同步记录做全量重同步 |
 | 清单未变化 | HTTP 304 快速路径，跳过下载阶段 |
-| `mods-server` + `mods-client` 未变化且 `mods/` 与目标一致 | 不重组 |
-| `mods/` 里出现非 agent 部署的 jar | 迁移到 `mods-client/`，日志留痕，不删除 |
-| 客户端模组与服务器 mod id 相同 | 跳过该客户端模组（服务器优先），文件仍保留在 `mods-client/` |
+| 清单、账本、`mods/` 三者一致 | 什么都不做（只做 stat 级校验，不重算全量哈希） |
+| `mods/` 里出现非 agent 部署的 jar | 视为玩家自己的模组，不触碰（mod id 冲突时才归档） |
+| 客户端模组与服务器 mod id 相同 | 服务器版本优先，玩家那份移入 `modsync/archive/`（可手动恢复） |
 | 玩家点了「跳过同步」 | 保留当前 `mods/` 直接启动 |
 | 服务器未开机 / 断网 | 默认沿用上次结果继续启动（`--strict` 可改为中止） |
 | 服务器 NeoForge 版本与本地不同 | 启动前大字提示 + 弹窗写明升级路径，默认仍继续同步（`loaderMismatch: abort` 可改为中止启动） |
@@ -182,7 +195,7 @@ bash test/run-all.sh
 MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Modrinth 直链回填用例
 ```
 
-覆盖：首次同步、幂等不重写、`--dry-run`、玩家自装模组共存、同 id 冲突服务器优先、误放 `mods/` 的迁移、
+覆盖：首次同步、幂等不重写、`--dry-run`、玩家自装模组永不被触碰、同 id 冲突进归档、删除客户端模组不再复活、
 服务器增删改的增量下载、本地篡改（同大小不同内容）检测、ETag/304、404/400、`-javaagent` 入口、
 `--once` 清单结构、`--exclude` 与 `--extra`、加载器/MC 版本比对（含 Prism `mmc-pack.json` 自动探测）、
 纯服务端模组过滤（Fabric 环境字段、NeoForge `dist` 注解的四种形态、`force-publish` 覆盖）、
@@ -202,7 +215,7 @@ MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Mo
 - **服务端有两种形态**：NeoForge 模组（`build-mod.sh`，丢进 `mods/` 即可，无需 Gradle）或独立进程（`build.sh`），
   两者共用同一个 loader 无关的 `io.modsync.server.SyncServer`。
 - **版本比对是"提醒"而非"自动升级"**：agent 只能读取本地实例的加载器版本并给出升级路径，不会替你改启动器配置（改启动器文件风险太高）。
-- **单服务器**：`state.json` 记录了一个 `serverId`；多服务器切换（每服独立账本 + 切换时重组）是下一步。
+- **单服务器**：一个实例只对应一个服务端；多服务器切换未实现（会给 `mods-server/` 换整套账本）。
 - **GUI 只在 Windows/macOS/Linux 桌面 JVM 上可用**，headless 环境自动退回控制台进度条。
 - 只管理 `mods/*.jar`；配置、资源包、光影等其它路径的同步在做清单 v2 时再扩。
 - 服务端模组判定是「宁可多发、不可漏发」：判定不出侧向时一律发布，靠 `excludes` / `forcePublish` 兜底。

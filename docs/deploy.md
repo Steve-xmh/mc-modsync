@@ -184,10 +184,10 @@ java -jar modsync-agent.jar --game-dir /path/to/.minecraft \
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `manifestUrl` | 空 | 必填（也可用 `--manifest-url` / `-Dmodsync.manifestUrl=`） |
-| `serverDir` / `clientDir` / `targetDir` | `mods-server` / `mods-client` / `mods` | 目录名；`targetDir` 是构建产物，玩家不要手动维护 |
+| `serverDir` / `targetDir` | `mods-server` / `mods` | 账本目录 / 玩家生效目录。`mods/` 由启动器与玩家共同使用，agent 只按对账结果增删服务器模组 |
 | `gui` | true | 进度窗口；headless 自动降级 |
 | `strict` | false | true = 同步失败时中止启动（默认只告警后继续） |
-| `autoMigrateUnknownMods` | true | 误丢进 `mods/` 的 jar 迁移到 `mods-client/`（不删除） |
+| `forceSync` | false | true：忽略清单时间戳的顺序护栏（正常情况下不需要） |
 | `loaderMismatch` | `warn` | 加载器版本不一致：`warn` 提醒 / `abort` 中止启动 / `ignore` 忽略 |
 | `minecraftMismatch` | `skip` | MC 版本不一致：`skip` 跳过同步 / `warn` 只提醒 / `abort` 中止 |
 | `warnHoldSeconds` | 8 | 不匹配提示窗口停留秒数，0 = 不弹窗 |

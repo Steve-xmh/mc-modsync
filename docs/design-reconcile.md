@@ -155,6 +155,17 @@ CLI 上的 `--force` / `--force-rebuild` / `--client-dir` / `--no-gui` 一并删
 `serverFiles`（账本快照：名字 → sha/size/mtime）、`deployed`（`mods/` 缓存：sha/size/mtime/origin）。
 新增 `manifestGeneratedAt`（已应用清单的 `generatedAt`）。删除 `lastBuildAt`、`lastFingerprint`。
 
+### `generatedAt` 解析（宽容）
+
+服务端为毫秒精度（`2026-10-08T15:04:05.123Z`），但历史/第三方清单可能是秒精度 `...:ssZ` 或 `+00:00`
+偏移。用 `Instant.parse` 为主、失败退 `OffsetDateTime.parse`，仍失败则视为**缺失**（= 禁删），
+不得因此报错退出。只有"本次严格晚于已应用的那个"才允许删除。
+
+### 本地清单的可用性
+
+`modsync/last-manifest.json` 存清单**原文字节**，state 里的 `manifestHash` 是它的 sha256。
+"本地清单可用" = 文件存在 **且** sha 与 state 记录一致；不一致一律当作不存在（禁删）。
+
 ### 清单有效性判定（任一不满足 → 本轮**完全不动**）
 
 body 为空/空白、JSON 解析失败、`files` 数组缺失或为空。
