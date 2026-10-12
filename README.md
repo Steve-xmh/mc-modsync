@@ -108,7 +108,6 @@ java -jar modsync-server.jar \
   "serverDir": "mods-server",
   "clientDir": "mods-client",
   "targetDir": "mods",
-  "gui": true,
   "strict": false,
   "autoMigrateUnknownMods": true,
   "forceRebuild": false,
@@ -125,7 +124,7 @@ java -jar modsync-server.jar \
 "$INST_JAVA" -jar "/绝对路径/modsync-agent.jar" --game-dir "$INST_MC_DIR"
 ```
 
-Prism 会在启动游戏前运行这条命令；成功（退出码 0）才继续启动。想只看控制台进度加 `--no-gui`。
+Prism 会在启动游戏前运行这条命令；成功（退出码 0）才继续启动。进度窗口与确认弹窗由 agent 自己显示（无显示环境自动退回控制台），没有关闭开关。
 `$INST_JAVA` / `$INST_MC_DIR` 由 Prism 自动替换。
 
 #### PCL2（Plain Craft Launcher）
@@ -134,7 +133,8 @@ Prism 会在启动游戏前运行这条命令；成功（退出码 0）才继续
 2. 版本设置 → 高级 → **JVM 参数**，追加：
 
 ```
--javaagent:modsync/modsync-agent.jar=--no-gui
+-javaagent:/绝对路径/modsync-agent.jar=--manifest-url=http://<服务器IP>:25590/modsync/manifest.json
+  # agent 自己的参数必须写在 "=" 之后、用逗号分隔；写成空格分隔的独立 --xxx 会让 JVM 拒绝启动
 ```
 
 3. 若你的启动器不是以 `.minecraft` 为工作目录，再补一个系统属性：
@@ -151,7 +151,7 @@ Prism 会在启动游戏前运行这条命令；成功（退出码 0）才继续
 java -jar modsync-agent.jar --game-dir /path/to/.minecraft --manifest-url http://host:25566/modsync/manifest.json
 ```
 
-常用参数：`--no-gui`、`--force`（强制重组）、`--dry-run`（只预览不改动）、`--strict`、`--parallel N`、`--verbose`、`--print-game-dir`、`--help`。
+常用参数：`--dry-run`（只预览不改动）、`--strict`、`--parallel N`、`--verbose`、`--print-game-dir`、`--help`。
 
 ## 同步行为细则
 

@@ -20,7 +20,6 @@ public final class AgentConfig {
     public String serverDirName = "mods-server";
     public String clientDirName = "mods-client";
     public String targetDirName = "mods";
-    public boolean gui = true;
     public boolean strict = false;
     public boolean autoMigrateUnknownMods = true;
     public boolean forceRebuild = false;
@@ -59,7 +58,6 @@ public final class AgentConfig {
                 cfg.serverDirName = Json.str(root, "serverDir", cfg.serverDirName);
                 cfg.clientDirName = Json.str(root, "clientDir", cfg.clientDirName);
                 cfg.targetDirName = Json.str(root, "targetDir", cfg.targetDirName);
-                cfg.gui = Json.bool(root, "gui", cfg.gui);
                 cfg.strict = Json.bool(root, "strict", cfg.strict);
                 cfg.autoMigrateUnknownMods = Json.bool(root, "autoMigrateUnknownMods", cfg.autoMigrateUnknownMods);
                 cfg.forceRebuild = Json.bool(root, "forceRebuild", cfg.forceRebuild);
@@ -83,12 +81,6 @@ public final class AgentConfig {
                 System.getProperty("modsync.manifestUrl"),
                 System.getenv("MODSYNC_MANIFEST_URL"),
                 cfg.manifestUrl);
-        if (args.has("no-gui") || "false".equalsIgnoreCase(System.getProperty("modsync.gui"))) {
-            cfg.gui = false;
-        }
-        if (args.flag("gui")) {
-            cfg.gui = true;
-        }
         if (args.has("strict")) {
             cfg.strict = args.flag("strict");
         }
@@ -161,7 +153,6 @@ public final class AgentConfig {
         root.put("serverDir", serverDirName);
         root.put("clientDir", clientDirName);
         root.put("targetDir", targetDirName);
-        root.put("gui", gui);
         root.put("strict", strict);
         root.put("autoMigrateUnknownMods", autoMigrateUnknownMods);
         root.put("forceRebuild", forceRebuild);

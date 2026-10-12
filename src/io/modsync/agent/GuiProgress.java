@@ -17,7 +17,7 @@ import java.io.PrintStream;
 
 /**
  * Swing progress window, shown before the game starts. Instantiated only from
- * {@link Progress#create(boolean, PrintStream, String)} inside a try/catch so that headless
+ * {@link Progress#create(PrintStream, String)} inside a try/catch so that headless
  * environments fall back to the console renderer.
  */
 final class GuiProgress extends Progress {

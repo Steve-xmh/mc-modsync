@@ -7,6 +7,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+JAVA="${JAVA:-java}"
 AGENT_JAR="$ROOT/build/modsync-agent.jar"
 PORT="${MODSYNC_TEST_PORT:-25871}"
 BASE="http://127.0.0.1:$PORT"
@@ -66,7 +67,7 @@ regen() { python3 "$ROOT/test/gen-manifest.py" --mods "$SRC" --out "$WWW" --base
 run_agent() {
   local log="$1"
   shift
-  java -jar "$AGENT_JAR" --game-dir "$SANDBOX" --manifest-url "$MANIFEST_URL" --no-gui "$@" >"$log" 2>&1
+  java -jar "$AGENT_JAR" --game-dir "$SANDBOX" --manifest-url "$MANIFEST_URL" "$@" >"$log" 2>&1
   return $?
 }
 
@@ -187,11 +188,27 @@ assert_same_content "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-
 
 # ---------------------------------------------------------------- T10 -javaagent
 say "T10 -javaagent 模式（PCL 等直接改 JVM 参数）"
-java "-javaagent:$AGENT_JAR=--game-dir=$SANDBOX --manifest-url=$MANIFEST_URL --no-gui" -version >"$WS/t10.log" 2>&1
-assert_eq "0" "$?" "java -javaagent 启动成功"
+# 启动器按空格切分 JVM 参数，所以 agent 自己的参数必须全部写在 "=" 之后、用逗号分隔。
+# 写成独立的 --xxx 会被 JVM 当成它自己的参数而拒绝启动（Unrecognized option）——
+# 这正是删掉 的原因。
+java "-javaagent:$AGENT_JAR=--game-dir=$SANDBOX,--manifest-url=$MANIFEST_URL" -version >"$WS/t10.log" 2>&1
+assert_eq "0" "$?" "java -javaagent 启动成功（逗号分隔多参数）"
 assert_contains "$WS/t10.log" "[modsync]" "premain 中执行了同步"
-assert_contains "$WS/t10.log" "清单" "premain 中读取了清单"
+assert_contains "$WS/t10.log" "$SANDBOX" "premain 解析出了 --game-dir"
+assert_contains "$WS/t10.log" "manifest.json" "premain 解析出了 --manifest-url"
 assert_contains "$WS/t10.log" "openjdk version" "premain 之后 JVM 正常继续（-version）"
+
+say "T11 启动器参数陷阱：agent 参数不能作为独立 JVM 参数"
+if "$JAVA" -javaagent:"$AGENT_JAR=--game-dir=$SANDBOX" "--manifest-url=$MANIFEST_URL" -version >"$WS/t11.log" 2>&1; then
+  fail "JVM 竟然接受了独立的 --manifest-url"
+else
+  pass "独立的 --xxx 会被 JVM 拒绝（所以必须写在 = 之后）"
+fi
+if "$JAVA" -jar "$AGENT_JAR" --help 2>&1 | grep -q 'no-gui'; then
+  fail "--help 中仍存在 no-gui"
+else
+  pass "--help 中已无 no-gui"
+fi
 
 echo
 echo "======================================"

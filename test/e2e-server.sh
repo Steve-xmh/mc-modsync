@@ -130,7 +130,7 @@ assert_eq "404" "$(curl -s -o /dev/null -w '%{http_code}' "$URL/files/$(printf '
 assert_eq "400" "$(curl -s -o /dev/null -w '%{http_code}' "$URL/files/not-a-hash")" "非法哈希返回 400"
 
 say "agent 首次同步（真服务端 + 真 agent）"
-java -jar "$AGENT_JAR" --game-dir "$GAME" --manifest-url "$MANIFEST_URL" --no-gui >"$WS/a1.log" 2>&1
+java -jar "$AGENT_JAR" --game-dir "$GAME" --manifest-url "$MANIFEST_URL" >"$WS/a1.log" 2>&1
 assert_eq "0" "$?" "agent 退出码为 0"
 assert_contains "$WS/a1.log" "下载 3" "下载了 3 个文件"
 assert_eq "3" "$(ls -1 "$GAME/mods"/*.jar 2>/dev/null | wc -l | tr -d ' ')" "mods 中部署 3 个 jar"
@@ -153,7 +153,7 @@ else
 fi
 
 say "agent 二次同步：走 ETag 304 快速路径"
-java -jar "$AGENT_JAR" --game-dir "$GAME" --manifest-url "$MANIFEST_URL" --no-gui >"$WS/a2.log" 2>&1
+java -jar "$AGENT_JAR" --game-dir "$GAME" --manifest-url "$MANIFEST_URL" >"$WS/a2.log" 2>&1
 assert_eq "0" "$?" "agent 退出码为 0"
 assert_contains "$WS/a2.log" "清单未变化 (HTTP 304)" "agent 命中 304 快速路径"
 assert_contains "$WS/a2.log" "无需重组" "未发生无谓重组"
@@ -170,7 +170,7 @@ java -jar "$SERVER_JAR" --mods "$MODS" --extra "$EXTRA" --exclude 'secret-*.jar'
   --state "$SRV/state.json" >>"$WS/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 50); do curl -sf "$URL/health" -o /dev/null && break; sleep 0.2; done
-java -jar "$AGENT_JAR" --game-dir "$GAME" --manifest-url "$MANIFEST_URL" --no-gui >"$WS/a3.log" 2>&1
+java -jar "$AGENT_JAR" --game-dir "$GAME" --manifest-url "$MANIFEST_URL" >"$WS/a3.log" 2>&1
 assert_contains "$WS/a3.log" "下载 1" "只增量下载变化的那一个文件"
 assert_eq "$(shasum -a 256 "$MODS/jei-1.0.jar" | cut -d' ' -f1)" \
           "$(shasum -a 256 "$GAME/mods/jei-1.0.jar" | cut -d' ' -f1)" "mods 中的 jar 已更新到新版本"

@@ -66,7 +66,10 @@ public final class Args {
                 has = true;
                 continue;
             }
-            if (Character.isWhitespace(c) && !inQuotes) {
+            // Whitespace *and* commas separate options: the JVM passes the whole
+            // "-javaagent:...=a=1,b=2" tail as one string, and commas are the only separator
+            // that survives launcher JVM-argument parsing.
+            if ((Character.isWhitespace(c) || c == ',') && !inQuotes) {
                 if (has) {
                     tokens.add(cur.toString());
                     cur.setLength(0);

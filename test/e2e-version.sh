@@ -46,7 +46,7 @@ curl -sf "$MANIFEST_URL" -o /dev/null || { echo "静态服务器启动失败" >&
 
 run_agent() { # <log> <gameDir> [extra args...]
   local log="$1" game="$2"; shift 2
-  java -jar "$AGENT_JAR" --game-dir "$game" --manifest-url "$MANIFEST_URL" --no-gui "$@" >"$log" 2>&1
+  java -jar "$AGENT_JAR" --game-dir "$game" --manifest-url "$MANIFEST_URL" "$@" >"$log" 2>&1
   return $?
 }
 

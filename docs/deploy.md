@@ -157,14 +157,14 @@ java -jar modsync-server.jar --mods ./mods --extra ./modsync/extra \
 
 - Prism 会在启动游戏前执行；退出码非 0 会中断启动。
 - `$INST_JAVA` / `$INST_MC_DIR` 由 Prism 替换，路径含空格也没问题。
-- 只想平时不弹窗：加 `--no-gui`（默认会显示同步进度窗口，可随时点「跳过同步」）。
+- 同步进度窗口与确认弹窗由 agent 自动显示（无显示环境自动退回控制台），没有关闭开关。
 
 ### 2.2 PCL2（Plain Craft Launcher 2）
 
 版本设置 → 高级 → **JVM 参数**，追加：
 
 ```
--javaagent:/绝对路径/modsync-agent.jar=--manifest-url=http://play.example.com:25590/modsync/manifest.json --no-gui
+-javaagent:/绝对路径/modsync-agent.jar=--manifest-url=http://play.example.com:25590/modsync/manifest.json
 ```
 
 `-javaagent` 的 `premain` 在 Minecraft 主类之前执行，模组在加载前就已就位。

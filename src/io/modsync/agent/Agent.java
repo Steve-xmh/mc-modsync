@@ -65,7 +65,7 @@ public final class Agent {
             log.println("[modsync] 游戏目录: " + gameDir);
             log.println("[modsync] 清单地址: " + cfg.manifestUrl);
 
-            Progress progress = Progress.create(cfg.gui, log, "ModSync — 正在同步服务器模组");
+            Progress progress = Progress.create(log, "ModSync — 正在同步服务器模组");
             try {
                 Syncer syncer = new Syncer(cfg, gameDir, progress, log);
                 syncer.run();
@@ -133,7 +133,8 @@ public final class Agent {
                   --config <file>        指定配置文件，默认 <gameDir>/modsync/config.json
                   --server-dir <name>    服务器模组目录名，默认 mods-server
                   --client-dir <name>    玩家自装模组目录名，默认 mods-client
-                  --no-gui               只用控制台进度（或 -Dmodsync.gui=false）
+                  多个参数用逗号分隔，例如 -javaagent:modsync-agent.jar=--manifest-url=...,--strict=false
+                  （切勿把 --xxx 当独立 JVM 参数写，JVM 会因为不认识的选项拒绝启动游戏）
                   --force                强制清空并重组 mods
                   --dry-run              只打印将要执行的操作，不改动任何文件
                   --strict               同步失败时中止游戏启动（默认仅告警后继续）

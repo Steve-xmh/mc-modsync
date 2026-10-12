@@ -28,16 +28,18 @@ public class Progress implements AutoCloseable {
         this.interactive = System.console() != null;
     }
 
-    /** Returns a GUI reporter when possible, otherwise the console reporter. */
-    public static Progress create(boolean wantGui, PrintStream out, String title) {
-        if (wantGui) {
-            try {
-                return new GuiProgress(out, title);
-            } catch (Throwable t) {
-                out.println("[modsync] 图形界面不可用，改用控制台进度: " + t);
-            }
+    /**
+     * Always tries the GUI reporter and falls back to the console when there is no display
+     * (headless server, no DISPLAY). There is deliberately no way to turn the GUI off: hiding it
+     * used to be a launch-breaking option, and the confirmation dialogs need it.
+     */
+    public static Progress create(PrintStream out, String title) {
+        try {
+            return new GuiProgress(out, title);
+        } catch (Throwable t) {
+            out.println("[modsync] 无图形环境，改用控制台进度: " + t);
+            return new Progress(out);
         }
-        return new Progress(out);
     }
 
     public final boolean isCancelled() {
