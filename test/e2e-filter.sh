@@ -142,6 +142,14 @@ m=json.load(open(sys.argv[1]))
 print('\n'.join(sorted(f['path'].split('/')[-1] for f in m['files'])))
 " "$1"; }
 
+# <manifest> <file name> -> yes/no：该条目是否带 modId
+entry_has_modid() { python3 - "$1" "$2" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+print("yes" if any(f["path"].split("/")[-1]==sys.argv[2] and f.get("modId") for f in m["files"]) else "no")
+PY
+}
+
 say "T1 默认开启过滤：只跳过纯服务端模组"
 gen "$WORK/m1.json"
 LIST="$(published "$WORK/m1.json")"
@@ -216,6 +224,110 @@ if grep -q 'duplicate file name' "$WORK/diag.txt"; then
   fail "同一路径被误报为重名"
 else
   pass "同一路径没有被误报为重名"
+fi
+
+say "T7 加载器报告的 jar-in-jar 虚拟路径绝不能被当成可发布文件"
+# 造一个「父 jar 内嵌模组 jar」的形状（真实案例：天境 aether 内嵌 accessories，
+# 结果被当成独立文件发布到了玩家 mods/ 里，而服务端根本没有那个文件）。
+mkdir -p "$WORK/jij/inner" "$WORK/jij/outer/META-INF/jarjar"
+make_neo_jar "$WORK/jij/inner/bundled-mod-1.0.jar" bundled_mod BothDefaultMod.class
+cp "$WORK/jij/inner/bundled-mod-1.0.jar" "$WORK/jij/outer/META-INF/jarjar/bundled-mod-1.0.jar"
+(cd "$WORK/jij/outer" && jar --create --file "$MODS/parent-with-jij-1.0.jar" .)
+
+mkdir -p "$WORK/probe-cp"
+(cd "$WORK/probe-cp" && jar --extract --file "$SERVER_JAR")
+mkdir -p "$WORK/probe"
+cat > "$WORK/probe/RealJarProbe.java" <<'JAVA'
+import io.modsync.common.ModMeta;
+import io.modsync.server.SyncServer;
+
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
+import java.nio.file.Path;
+import java.util.List;
+
+/** 断言：只有默认文件系统上的真实 .jar 才可能被发布（用 zip 文件系统模拟 FML 的 jar-in-jar）。 */
+public final class RealJarProbe {
+    public static void main(String[] args) throws Exception {
+        Path parent = Path.of(args[0]);
+        Path real = Path.of(args[1]);
+        Path state = Path.of(args[2]);
+        try (FileSystem zipFs = FileSystems.newFileSystem(parent)) {
+            Path nested = zipFs.getPath("/META-INF/jarjar/bundled-mod-1.0.jar");
+            check(!ModMeta.isRealJar(nested), "zip 文件系统里的嵌套 jar 必须被判为非真实文件");
+            check(ModMeta.isRealJar(real), "真实 jar 必须被判为真实文件");
+
+            SyncServer virtual = new SyncServer(options(state, List.of(nested)));
+            virtual.generate();
+            check(virtual.fileCount() == 0, "只有虚拟路径时不应发布任何文件，实际 " + virtual.fileCount());
+            check(!virtual.manifestJson().contains("bundled-mod"), "虚拟路径不得出现在清单里");
+
+            SyncServer actual = new SyncServer(options(state, List.of(real)));
+            actual.generate();
+            check(actual.fileCount() == 1, "真实 jar 应被发布，实际 " + actual.fileCount());
+            check(actual.manifestJson().contains(real.getFileName().toString()), "真实 jar 应出现在清单里");
+        }
+        System.out.println("probe-ok");
+    }
+
+    private static SyncServer.Options options(Path state, List<Path> explicit) {
+        return new SyncServer.Options(List.of(), List.of(), 0, "127.0.0.1", "", "", "", state,
+                false, true, true, List.of(), "1.21.1", "neoforge", "21.1.248", explicit);
+    }
+
+    private static void check(boolean ok, String message) {
+        if (!ok) {
+            System.err.println("probe-fail: " + message);
+            System.exit(1);
+        }
+    }
+}
+JAVA
+if javac -encoding UTF-8 -cp "$WORK/probe-cp" -d "$WORK/probe-cp" "$WORK/probe/RealJarProbe.java" >"$WORK/probe-javac.log" 2>&1; then
+  if java -cp "$WORK/probe-cp" RealJarProbe "$MODS/parent-with-jij-1.0.jar" \
+        "$MODS/neo-bothdefault-1.0.jar" "$WORK/probe-state.json" >"$WORK/probe.log" 2>&1; then
+    pass "虚拟路径被判为非文件且不发布；同一判定下真实 jar 照常发布"
+  else
+    fail "探针断言失败: $(cat "$WORK/probe.log")"
+  fi
+else
+  fail "探针编译失败: $(cat "$WORK/probe-javac.log")"
+fi
+
+say "T8 FML LIBRARY 形态的 jar（没有 mods.toml）也必须发布"
+# 真实案例：kotlinforforge 的 MANIFEST.MF 只有 FMLModType: LIBRARY，
+# 它不出现在 ModList.getMods() 里，所以「只发已加载的 mod」的实现永远发不出去，
+# 而客户端会因为它缺失直接拒绝启动（sliceanddice 需要这个语言提供者）。
+mkdir -p "$WORK/libstage/lib"
+printf 'not a mod\n' > "$WORK/libstage/lib/payload.txt"
+cat > "$WORK/libstage/MANIFEST.MF" <<'EOF'
+Manifest-Version: 1.0
+FMLModType: LIBRARY
+EOF
+(cd "$WORK/libstage" && jar --create --file "$MODS/neo-library-1.0.jar" --manifest MANIFEST.MF .)
+
+gen "$WORK/m8.json"
+LIST8="$(published "$WORK/m8.json")"
+if echo "$LIST8" | grep -qx "neo-library-1.0.jar"; then
+  pass "LIBRARY jar 被发布"
+else
+  fail "LIBRARY jar 未被发布"
+fi
+if [ "$(entry_has_modid "$WORK/m8.json" neo-library-1.0.jar)" = "no" ]; then
+  pass "LIBRARY jar 没有 modId（确认它不是 mod，却仍被发布）"
+else
+  fail "LIBRARY jar 不应带 modId"
+fi
+COUNT8="$(echo "$LIST8" | grep -c .)"
+if [ "$COUNT8" = "9" ]; then
+  pass "目录里 11 个 jar：过滤 2 个纯服务端后发布 9 个"
+else
+  fail "期望 9 个，实际 $COUNT8"
+fi
+if echo "$LIST8" | grep -qx "bundled-mod-1.0.jar"; then
+  fail "内嵌 jar 被单独发布了（应只随父 jar 一起发布）"
+else
+  pass "内嵌在父 jar 里的模组没有被单独发布"
 fi
 
 echo

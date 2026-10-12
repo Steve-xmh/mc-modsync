@@ -11,6 +11,7 @@
 - **玩家自装模组是一等公民**：你自己的模组直接放在 `mods/` 里，只要 mod id 不与服务器冲突就**永不被 agent 触碰**；冲突时服务器版本优先，你那份移入 `modsync/archive/`，随时可以手动放回。
 - **服务端只需要装一个模组**：模组启动时直接读取 FML **实际加载**的模组文件作为发布源（`publishLoadedMods`），完全不依赖目录布局；端口、排除规则等都在 `config/modsync-server.json` 里改。
 - **自动过滤纯服务端模组**：性能/管理类的服务端专属模组不会推给玩家（识别 Fabric `environment: server`、NeoForge `@Mod(dist=DEDICATED_SERVER)`——真解析 class 注解，不会把「代码里引用了 Dist 的双端模组」误判）。
+- **发布的是「FML 实际加载的 jar」**：包含 `FMLModType: LIBRARY` 的库（KotlinForForge 等，它们不是 mod，却常是客户端能不能启动的关键），但排除 jar-in-jar 内嵌件——那只是父 jar 内部的虚拟路径，服务器磁盘上并没有这个文件。
 - **发布器永远不会把自己发给玩家**：模组形态与独立进程形态都在运行时排除自身 jar（**改了文件名字也不会漏**），默认 glob 只是兜底。
 - **服务器升级会提醒玩家**：清单带上服务器的 Minecraft / 加载器版本，客户端启动前比对并给出「去启动器把 NeoForge 改成 X」的具体路径，可配置为仅提醒或直接中止启动。
 - **零第三方依赖**：两个 jar 只用 JDK 21（`java.net.http`、`com.sun.httpserver`、`java.util.zip`），没有 Gradle/Netty/Guava；服务端既可以做成 NeoForge 模组（`java -jar` 都不用），也可以是独立进程。
@@ -56,14 +57,14 @@
 # build/modsync-server.jar   服务端（独立进程）
 # build/modsync-agent.jar    客户端（同时是 -javaagent 和可执行 jar）
 ./build-mod.sh                # 可选：NeoForge 服务端模组（对着本地 NeoForge 依赖编译，不需要 Gradle）
-# build/modsync-neoforge-1.2.1.jar
+# build/modsync-neoforge-1.2.2.jar
 ```
 
 ### 2. 服务端
 
 #### 方式 A：NeoForge 模组（推荐：装完就完事）
 
-把 `modsync-neoforge-1.2.1.jar` 丢进服务器 `mods/`，重启服务器即可 —— 不用起第二个进程，也不用登记任何目录。
+把 `modsync-neoforge-1.2.2.jar` 丢进服务器 `mods/`，重启服务器即可 —— 不用起第二个进程，也不用登记任何目录。
 模组启动时会问 FML **这台服务器实际加载了哪些模组文件**，直接把那些 jar 当作发布源：
 
 ```jsonc
@@ -186,12 +187,14 @@ java -jar modsync-agent.jar --game-dir /path/to/.minecraft --manifest-url http:/
 | 服务器 Minecraft 版本与本地不同 | 默认**跳过同步**并提示换成对应版本（跨版本模组会崩），仍放行启动 |
 | 服务器模组被判定为纯服务端 | 根本不发布给客户端（Fabric `environment` / NeoForge `@Mod(dist)` / Modrinth 元数据，见 deploy.md 1.4） |
 | jar 在 `mods/` 里但服务器没加载它 | 模组形态下不会发布（发布源是「已加载」而非「目录里有」）；要强行发布就放进 `modsync/extra/` 或 `modDirs` |
+| 模组把别的模组打包在自己 jar 里（jar-in-jar） | 内嵌的那份**不单独发布**（它只存在于父 jar 内部，服务器磁盘上并没有这个文件）；客户端由父 jar 自己带进去 |
+| FML 以 `FMLModType: LIBRARY` 加载的库（如 KotlinForForge） | **发布**：它不是 mod（没有 `mods.toml`，不出现在 `ModList.getMods()` 里），但客户端常常离了它就无法加载，所以按「已加载的 mod 文件」一并发布 |
 
 ## 端到端验证
 
 ```bash
 bash test/run-all.sh
-# agent 46 + 版本比对 19 + 发布范围/过滤 21 + 对账 54 + 全栈（真服务端 + 真 agent）23 = 163 项
+# agent 46 + 版本比对 19 + 发布范围/过滤 26 + 对账 54 + 全栈（真服务端 + 真 agent）23 = 168 项
 
 MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Modrinth 直链回填用例
 ```
@@ -201,7 +204,8 @@ MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Mo
 服务器增删改的增量下载、本地篡改（同大小不同内容）检测、ETag/304、404/400、`-javaagent` 入口、
 `--once` 清单结构、`--exclude` 与 `--extra`、加载器/MC 版本比对（含 Prism `mmc-pack.json` 自动探测）、
 纯服务端模组过滤（Fabric 环境字段、NeoForge `dist` 注解的四种形态、`force-publish` 覆盖）、
-发布范围（`--mod-file` 精确指定、同一文件同时来自目录与显式指定时只算一次且不误报重名）。
+发布范围（`--mod-file` 精确指定、同一文件同时来自目录与显式指定时只算一次且不误报重名、
+jar-in-jar 内嵌件不会被当成独立文件发布、`FMLModType: LIBRARY` 的库仍会被发布）。
 
 ## 安全模型（重要）
 

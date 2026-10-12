@@ -267,14 +267,31 @@ public final class SyncServer implements AutoCloseable {
      *
      * <p>Deduplicated by real path, so a jar that is both loaded and present in {@code mods/} is
      * only considered once.
+     *
+     * <p>Explicit entries are additionally checked with {@link ModMeta#isRealJar(Path)}: FML reports
+     * jar-in-jar children as ordinary paths on its own filesystem, and publishing one would ship a jar
+     * the server does not have (see {@code ModMeta.isRealJar}). Those are counted and reported instead
+     * of vanishing silently.
      */
     private List<Path> candidateFiles() throws IOException {
         List<Path> files = new ArrayList<>();
         java.util.Set<Path> seen = new java.util.HashSet<>();
+        int notRealFiles = 0;
         for (Path file : opt.explicitFiles() == null ? List.<Path>of() : opt.explicitFiles()) {
-            if (file != null && Files.isRegularFile(file) && seen.add(realOrAbsolute(file))) {
+            if (file == null) {
+                continue;
+            }
+            if (!ModMeta.isRealJar(file)) {
+                notRealFiles++;
+                continue;
+            }
+            if (seen.add(realOrAbsolute(file))) {
                 files.add(file);
             }
+        }
+        if (notRealFiles > 0) {
+            diag("[modsync-server] skipped " + notRealFiles + " loaded entry(ies) that are not real .jar "
+                    + "files on disk (jar-in-jar children live inside their parent jar; missing files count too)");
         }
         for (Path dir : opt.modDirs() == null ? List.<Path>of() : opt.modDirs()) {
             if (dir == null) {

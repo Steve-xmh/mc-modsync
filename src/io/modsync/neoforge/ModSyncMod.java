@@ -1,6 +1,7 @@
 package io.modsync.neoforge;
 
 import io.modsync.common.Json;
+import io.modsync.common.ModMeta;
 import io.modsync.server.SyncServer;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -178,13 +179,29 @@ public final class ModSyncMod {
      * The jars FML actually loaded on this dedicated server.
      *
      * <p>This is the source of truth instead of scanning a directory: it does not care where a mod
-     * file lives, it cannot publish a jar the server is not running, and both jar-in-jar children
-     * (virtual paths) and loader artifacts under {@code libraries/} are skipped automatically.
+     * file lives, it cannot publish a jar the server is not running, and loader artifacts under
+     * {@code libraries/} are skipped automatically.
+     *
+     * <p>Two passes, because they cover different things:
+     *
+     * <ol>
+     *   <li>{@code ModList.getMods()} — every loaded mod, filtered by mod id so the loader's own
+     *       entries stay out.</li>
+     *   <li>{@code ModList.getModFiles()} — every loaded mod <em>file</em>. This is what catches jars
+     *       that are not mods at all yet that clients still need: {@code FMLModType: LIBRARY} jars such
+     *       as KotlinForForge. A mod that declares {@code kotlinforforge} as a language provider makes
+     *       the client refuse to load, and libraries never show up in {@code getMods()}.</li>
+     * </ol>
+     *
+     * <p>Jar-in-jar children appear in both passes, but as paths on FML's own jar filesystem (FML reads
+     * them straight out of the parent jar). {@link ModMeta#isRealJar(Path)} drops those, so a mod
+     * bundled inside another jar is never published as a standalone file.
      */
     private static List<Path> loadedModFiles(Path gameDir) {
         List<Path> files = new ArrayList<>();
         java.util.Set<Path> seenFiles = new java.util.HashSet<>();
         Path libraries = gameDir.resolve("libraries").toAbsolutePath().normalize();
+        int considered = 0;
         try {
             for (Object modInfo : net.neoforged.fml.ModList.get().getMods()) {
                 Object idValue = invokeByInterface(modInfo, "getModId");
@@ -192,26 +209,70 @@ public final class ModSyncMod {
                         || LOADER_MOD_IDS.contains(modId) || "modsync".equals(modId)) {
                     continue;
                 }
-                Object owning = invokeByInterface(modInfo, "getOwningFile");
-                Object fileInfo = invokeByInterface(owning, "getFile");
-                Object pathValue = invokeByInterface(fileInfo != null ? fileInfo : owning, "getFilePath");
-                if (!(pathValue instanceof Path path)) {
-                    continue;
-                }
-                Path abs = path.toAbsolutePath().normalize();
-                if (!abs.getFileName().toString().endsWith(".jar")
-                        || !Files.isRegularFile(abs)
-                        || abs.startsWith(libraries)
-                        || !seenFiles.add(abs)) {
-                    continue;
-                }
-                files.add(abs);
+                considered++;
+                addLoadedFile(pathOf(modInfo), libraries, seenFiles, files);
             }
         } catch (Throwable ignored) {
             // Best effort; callers fall back to the configured directories.
         }
+        try {
+            Object modFiles = invokeAny(net.neoforged.fml.ModList.get(), "getModFiles");
+            if (modFiles instanceof Iterable<?> iterable) {
+                for (Object fileInfo : iterable) {
+                    considered++;
+                    addLoadedFile(pathOf(fileInfo), libraries, seenFiles, files);
+                }
+            }
+        } catch (Throwable ignored) {
+            // Unknown loader build: the mod pass above is still a valid publish set.
+        }
+        int dropped = considered - files.size();
+        if (dropped > 0) {
+            System.out.println("[modsync] ignored " + dropped + " loaded entry(ies) that are not real jars:"
+                    + " jar-in-jar children, libraries/ artifacts or files already seen");
+        }
         files.sort(java.util.Comparator.comparing(p -> p.getFileName().toString()));
         return files;
+    }
+
+    /** Adds one path reported by FML when it is a real jar outside {@code libraries/}; deduplicated. */
+    private static void addLoadedFile(Path path, Path libraries, java.util.Set<Path> seenFiles, List<Path> files) {
+        if (path == null) {
+            return;
+        }
+        Path abs = path.toAbsolutePath().normalize();
+        if (!ModMeta.isRealJar(abs) || abs.startsWith(libraries) || !seenFiles.add(abs)) {
+            return;
+        }
+        files.add(abs);
+    }
+
+    /** Resolves {@code IModInfo/IModFileInfo -> IModFile -> getFilePath()} through reflection. */
+    private static Path pathOf(Object modInfoOrFileInfo) {
+        Object owning = invokeByInterface(modInfoOrFileInfo, "getOwningFile");
+        Object fileInfo = invokeByInterface(owning != null ? owning : modInfoOrFileInfo, "getFile");
+        Object pathValue = invokeByInterface(fileInfo != null ? fileInfo : owning, "getFilePath");
+        return pathValue instanceof Path p ? p : null;
+    }
+
+    /**
+     * Invokes a public no-arg method by name, trying the concrete class first: {@code ModList} exposes
+     * {@code getModFiles()} on the class itself rather than through an interface, and the SPI types it
+     * returns are not on the compile classpath.
+     */
+    private static Object invokeAny(Object target, String methodName) {
+        if (target == null) {
+            return null;
+        }
+        try {
+            java.lang.reflect.Method method = target.getClass().getMethod(methodName);
+            if (method.getParameterCount() == 0) {
+                return method.invoke(target);
+            }
+        } catch (Throwable ignored) {
+            // fall through to the interface search
+        }
+        return invokeByInterface(target, methodName);
     }
 
     /** Invokes a public no-arg method found on one of the target's interfaces. */

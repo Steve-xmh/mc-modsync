@@ -19,11 +19,11 @@
 ```bash
 # 在有 JDK 21 的机器上构建（无需 Gradle，对着本地 NeoForge 依赖编译即可）
 ./build.sh
-./build-mod.sh                        # 产出 build/modsync-neoforge-1.2.1.jar
+./build-mod.sh                        # 产出 build/modsync-neoforge-1.2.2.jar
 ./build-mod.sh --neo-libs /path/to/neoforge/libraries   # 或显式指定依赖来源
 ```
 
-把 `build/modsync-neoforge-1.2.1.jar` 放进服务器 `mods/`，重启服务器即可 —— **不需要第二个进程，也不需要登记要发布哪些目录**。
+把 `build/modsync-neoforge-1.2.2.jar` 放进服务器 `mods/`，重启服务器即可 —— **不需要第二个进程，也不需要登记要发布哪些目录**。
 模组启动时会向 FML 询问这台服务器**实际加载了哪些模组文件**，直接以那些 jar 作为发布源（`publishLoadedMods`）。
 首次启动会生成 `config/modsync-server.json`：
 
@@ -64,7 +64,8 @@
 | 服务器加载的模组（不论放在哪个目录） | 发布 |
 | 客户端专用、服务器不加载的模组（Sodium / 光影 / 小地图…） | 默认**不发布**；放进 `modsync/extra/` 或写进 `modDirs` 才会发布 |
 | `mods/` 里存在但服务器**没有加载**的 jar（被 FML 拒绝、放错地方） | 不发布。这正是"发布已加载"的用意：推给玩家的一定是服务器真在跑的东西 |
-| 加载器自身（`minecraft` / `neoforge`）、jar-in-jar 嵌套的虚拟文件 | 不发布（自动） |
+| FML 以 `FMLModType: LIBRARY` 加载的库（KotlinForForge 等，位于 `mods/`） | **发布**。它不是 mod（没有 `mods.toml`，不出现在 `ModList.getMods()`），但常常是客户端能不能启动的关键 |
+| 加载器自身（`minecraft` / `neoforge`）、jar-in-jar 嵌套的虚拟文件 | 不发布（自动）。内嵌件只存在于父 jar 内部（FML 的 jar 文件系统路径），服务器磁盘上没有这个文件，发出去只会让客户端多出一份重复的模组 |
 | ModSync 模组自己 | 不发布（自动，改名也一样） |
 | 判定为纯服务端的模组 | 不发布（见 1.4，可用 `forcePublish` 覆盖） |
 
@@ -79,6 +80,8 @@ curl http://<服务器IP>:25590/modsync/manifest.json | head -40
 - **发布器永不发布自己**：模组形态在启动时反射读出自身 jar 的文件名并加进排除（**改文件名也不会漏**，日志 `not publishing our own mod jar: ...`）；独立进程形态同样按运行位置排除（日志 `not publishing our own jar: ...`）。默认 glob `modsync-neoforge-*.jar` / `modsync-server*.jar` 只是兜底。
 - 只想给客户端、服务端不加载的模组（Sodium/Iris/光影类）：放进 `modsync/extra/`，模组会自动创建这个目录。它们同样会被同步，但不会被服务端加载。注意这类模组若声明了 `displayTest="IGNORE_SERVER_VERSION"`（或 `@Mod(dist=CLIENT)`）时才允许玩家带着它进服。
 - 两端都要装的模组 = 服务器加载的那批（自动发布）；只有客户端要装的 = `modsync/extra/` 或 `modDirs`。这个划分决定玩家能否顺利进服。
+- **`FMLModType: LIBRARY` 的库会被发布**（KotlinForForge 这类「客户端离了它就起不来」的语言/库提供者）。服务端启动日志里 `ignored N loaded entry(ies) that are not real jars` 统计的就是被跳过的内嵌件与 `libraries/` 产物；若清单里出现了你不想发的库，用 `excludes` 挡掉。
+- **内嵌（jar-in-jar）的模组不会被单独发布**：它在服务端只是一个父 jar 内部的虚拟路径，`mods/` 里并不存在这个文件。判定基于「路径是否位于默认文件系统」，所以哪怕 FML 报告它 `isRegularFile() == true` 也不会泄漏。
 - 关掉自动识别（`"publishLoadedMods": false`）会退回「扫描目录」模式，此时 `modDirs` 为空会自动退回 `["mods"]`。
 - `--modrinth-lookup`/`modrinthLookup` 打开后，命中 Modrinth 的文件会让客户端走 CDN，省服务器上行带宽，同时作者的下载量也记上了。
 
@@ -242,6 +245,7 @@ java -jar modsync-agent.jar --game-dir /path/to/.minecraft \
 | 现象 | 原因 / 处理 |
 | --- | --- |
 | 客户端缺某个模组 | 服务器没加载它（看服务器启动日志有没有 FML 的报错/拒绝），把它放进 `modsync/extra/` 或写进 `modDirs`；纯服务端模组被过滤时日志会有 `skipping server-only mod` |
+| 客户端报 `needs language provider xxx` / `Missing language xxx` 后崩溃 | 该库是以 `FMLModType: LIBRARY` 加载的（KotlinForForge 等），1.2.2 起会自动发布；如果你关掉了 `publishLoadedMods` 或它不在服务端 `mods/` 里，就把它放进 `modsync/extra/`。注意这类崩溃常表现为**另一个模组**读配置抛异常（FML 进入 broken mod state 后配置根本没加载），先看崩溃报告前面几行的 `needs language provider` |
 | 想换端口 | 改 `config/modsync-server.json` 的 `port` 后重启服务器，并同步放行新端口（客户端 `manifestUrl` 也要改） |
 | 模组日志 `BindException` | 25590 被占用（如另一个 ModSync 进程）。改 `port` 或停掉占用者；模组会给出提示且不影响服务器运行 |
 | 每次启动都重下全部文件 | 服务端文件在变（mtime 无关，看 sha256）；或客户端 `state.json` 被删；或 `serverId` 变了（换目录/删状态文件）→ 视为换服全量重同步 |

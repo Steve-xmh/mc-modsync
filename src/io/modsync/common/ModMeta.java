@@ -3,6 +3,7 @@ package io.modsync.common;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -15,6 +16,24 @@ import java.util.zip.ZipFile;
 public final class ModMeta {
 
     private ModMeta() {
+    }
+
+    /**
+     * True when {@code path} is a real {@code .jar} file on the default filesystem.
+     *
+     * <p>FML also hands out paths for jar-in-jar children and other loader internals. Those live on a
+     * custom {@link java.nio.file.FileSystem} mounted over the owning jar, so they report
+     * {@code isRegularFile() == true} even though no such file exists on disk — the loader reads them
+     * straight out of the parent jar. Treating them as files would publish a jar this server never had
+     * (the client would then get a standalone copy of a mod the parent jar already bundles, plus a
+     * {@code modId}-less manifest entry).
+     */
+    public static boolean isRealJar(Path path) {
+        if (path == null || path.getFileSystem() != FileSystems.getDefault()) {
+            return false;
+        }
+        Path name = path.getFileName();
+        return name != null && name.toString().endsWith(".jar") && Files.isRegularFile(path);
     }
 
     public static String sha256(Path file) throws IOException {
