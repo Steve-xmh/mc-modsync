@@ -191,17 +191,30 @@ assert_contains "$WS/t9.log" "下载 1" "通过直链下载了更新"
 assert_same_content "$SANDBOX/mods/create-1.0.jar" "$SANDBOX/mods-server/create-1.0.jar" "直链下载后内容一致"
 
 # ---------------------------------------------------------------- T9b 篡改检测
-say "T9b 本地文件被改动（大小不变）：按 sha256 检出并重新下载"
-python3 - "$SANDBOX/mods-server/create-1.0.jar" <<'PY'
+say "T9b 两份都被改动（大小不变）：按 sha256 检出并重新下载"
+python3 - "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-1.0.jar" <<'PY'
 import sys
-p = sys.argv[1]
-data = bytearray(open(p, "rb").read())
-data[-1] ^= 0xFF  # 大小不变，内容变了
-open(p, "wb").write(bytes(data))
+for p in sys.argv[1:]:
+    data = bytearray(open(p, "rb").read())
+    data[-1] ^= 0xFF  # 大小不变，内容变了
+    open(p, "wb").write(bytes(data))
 PY
 run_agent "$WS/t9b.log"
 assert_contains "$WS/t9b.log" "下载 1" "检出哈希不匹配并重新下载"
 assert_same_content "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-1.0.jar" "修复后 mods 与 mods-server 一致"
+
+say "T9c 只有账本被改坏（mods/ 那份是对的）：用本地文件修账本，不联网"
+python3 - "$SANDBOX/mods-server/create-1.0.jar" <<'PY'
+import sys
+p = sys.argv[1]
+data = bytearray(open(p, "rb").read())
+data[-1] ^= 0xFF
+open(p, "wb").write(bytes(data))
+PY
+run_agent "$WS/t9c.log"
+assert_contains "$WS/t9c.log" "沿用" "用 mods/ 里内容一致的文件补账本"
+assert_contains "$WS/t9c.log" "下载 0" "没有重复下载"
+assert_same_content "$SANDBOX/mods-server/create-1.0.jar" "$SANDBOX/mods/create-1.0.jar" "账本被修复"
 
 # ---------------------------------------------------------------- T10 -javaagent
 say "T10 -javaagent 模式（PCL 等直接改 JVM 参数）"

@@ -19,11 +19,11 @@
 ```bash
 # 在有 JDK 21 的机器上构建（无需 Gradle，对着本地 NeoForge 依赖编译即可）
 ./build.sh
-./build-mod.sh                        # 产出 build/modsync-neoforge-1.2.0.jar
+./build-mod.sh                        # 产出 build/modsync-neoforge-1.2.1.jar
 ./build-mod.sh --neo-libs /path/to/neoforge/libraries   # 或显式指定依赖来源
 ```
 
-把 `build/modsync-neoforge-1.2.0.jar` 放进服务器 `mods/`，重启服务器即可 —— **不需要第二个进程，也不需要登记要发布哪些目录**。
+把 `build/modsync-neoforge-1.2.1.jar` 放进服务器 `mods/`，重启服务器即可 —— **不需要第二个进程，也不需要登记要发布哪些目录**。
 模组启动时会向 FML 询问这台服务器**实际加载了哪些模组文件**，直接以那些 jar 作为发布源（`publishLoadedMods`）。
 首次启动会生成 `config/modsync-server.json`：
 

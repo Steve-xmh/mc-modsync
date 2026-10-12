@@ -276,6 +276,7 @@ public final class Syncer {
         Map<String, Path> ledger = listJarsMap(l.serverDir());
         Map<String, String> ledgerSha = new LinkedHashMap<>();
         Set<String> ledgerOk = new HashSet<>();
+        List<String> adopted = new ArrayList<>();
         List<Map.Entry<String, Desired>> pending = new ArrayList<>();
         long pendingBytes = 0;
         for (Map.Entry<String, Desired> e : desired.entrySet()) {
@@ -287,12 +288,25 @@ public final class Syncer {
                 result.verified++;
                 continue;
             }
+            if (modsMatches(l.targetDir().resolve(name), name, e.getValue(), state)) {
+                // mods/ 里已经有内容完全一致的文件：玩家自己装过整套模组、或删过账本。
+                // 直接用它填账本——既不重新下载那几百 MB，也不该把它当成"玩家模组"归档。
+                ledgerOk.add(name);
+                ledgerSha.put(name, e.getValue().sha256());
+                adopted.add(name);
+                result.verified++;
+                continue;
+            }
             if (file != null) {
                 // 旧账本内容的 sha：决定 mods/ 里的同名文件是服务器旧版（进 trash）还是玩家的（进 archive）
                 ledgerSha.put(name, ledgerSha(file, name, state));
             }
             pending.add(e);
             pendingBytes += Math.max(0, e.getValue().size());
+        }
+        if (!adopted.isEmpty()) {
+            progress.info("沿用 " + cfg.targetDirName + "/ 里已有的 " + adopted.size()
+                    + " 个文件（内容与清单一致，未重复下载）");
         }
         progress.info("校验 " + cfg.serverDirName + ": 已符合 " + result.verified + " 个"
                 + (pending.isEmpty() ? "" : "，需下载 " + pending.size() + " 个 (" + humanBytes(pendingBytes) + ")"));
@@ -348,7 +362,9 @@ public final class Syncer {
 
         List<String> evictions = new ArrayList<>();
         for (Map.Entry<String, Path> e : modsFiles.entrySet()) {
-            if (ledger.containsKey(e.getKey())) {
+            if (ledger.containsKey(e.getKey()) || desired.containsKey(e.getKey())) {
+                // 账本里的文件由对账处理；名字本身就是清单条目的（无论内容是否一致）由安装流程
+                // 负责替换或沿用，不该再被当成"玩家的模组"归档一次。
                 continue;
             }
             String modId = targetModId(e.getValue(), e.getKey(), state);
@@ -442,6 +458,13 @@ public final class Syncer {
             }
             installs.add(name);
             modes.put(name, ledgerFine ? "deploy" : (ledger.containsKey(name) ? "update" : "add"));
+        }
+
+        if (!cfg.dryRun && !adopted.isEmpty()) {
+            // 账本里还没有这些文件，用 mods/ 里的同一份内容补上（不联网）
+            for (String name : adopted) {
+                putLedger(l, name, l.targetDir().resolve(name), desired.get(name), state);
+            }
         }
 
         for (String name : installs) {

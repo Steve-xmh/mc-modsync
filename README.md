@@ -40,6 +40,7 @@
 | 同路径但 sha 变了 | 更新（= 删旧 + 加新），`mods/` 里换成新版本 |
 | 账本里有、新清单里没有 | 服务器删除了它 → 从账本与 `mods/` 同时移除（旧版进 `trash/`） |
 | 同 mod id 但换了文件名 | 视为更新，先清除旧的再放新的，不会出现两个同 id 的 jar |
+| 清单里有、`mods/` 里已有内容一致的同名文件 | **沿用**它填账本：不重复下载、不归档、不重写 |
 | `mods/` 里有、账本里没有、mod id 也不冲突 | **这是你自己的模组，永远不碰** |
 | `mods/` 里有、mod id 与服务器冲突 | 服务器版本优先，你那份移入 `modsync/archive/` |
 | 清单不可信（拉取失败 / JSON 损坏 / `files` 为空 / 时间戳倒退 / 无本地清单） | **本轮完全不动**，照常启动 |
@@ -55,14 +56,14 @@
 # build/modsync-server.jar   服务端（独立进程）
 # build/modsync-agent.jar    客户端（同时是 -javaagent 和可执行 jar）
 ./build-mod.sh                # 可选：NeoForge 服务端模组（对着本地 NeoForge 依赖编译，不需要 Gradle）
-# build/modsync-neoforge-1.2.0.jar
+# build/modsync-neoforge-1.2.1.jar
 ```
 
 ### 2. 服务端
 
 #### 方式 A：NeoForge 模组（推荐：装完就完事）
 
-把 `modsync-neoforge-1.2.0.jar` 丢进服务器 `mods/`，重启服务器即可 —— 不用起第二个进程，也不用登记任何目录。
+把 `modsync-neoforge-1.2.1.jar` 丢进服务器 `mods/`，重启服务器即可 —— 不用起第二个进程，也不用登记任何目录。
 模组启动时会问 FML **这台服务器实际加载了哪些模组文件**，直接把那些 jar 当作发布源：
 
 ```jsonc
@@ -190,12 +191,12 @@ java -jar modsync-agent.jar --game-dir /path/to/.minecraft --manifest-url http:/
 
 ```bash
 bash test/run-all.sh
-# agent 43 + 版本比对 19 + 发布范围/过滤 21 + 对账 48 + 全栈（真服务端 + 真 agent）23 = 154 项
+# agent 46 + 版本比对 19 + 发布范围/过滤 21 + 对账 54 + 全栈（真服务端 + 真 agent）23 = 163 项
 
 MODSYNC_TEST_ONLINE=1 bash test/run-all.sh   # 额外跑一条需要外网的 Modrinth 直链回填用例
 ```
 
-覆盖：首次同步（无账本只增不删）、幂等不重写（mtime 不变）、`--dry-run`、玩家自装模组永不被触碰、同 id 冲突进归档、
+覆盖：首次同步（无账本只增不删、已有一致文件则沿用不重下）、幂等不重写（mtime 不变）、`--dry-run`、玩家自装模组永不被触碰、同 id 冲突进归档、
 **玩家删掉客户端模组不再复活**、玩家删服务器模组被补回、服务器增删改、改名不重复下载、时间戳护栏、空/坏清单完全不动、
 服务器增删改的增量下载、本地篡改（同大小不同内容）检测、ETag/304、404/400、`-javaagent` 入口、
 `--once` 清单结构、`--exclude` 与 `--extra`、加载器/MC 版本比对（含 Prism `mmc-pack.json` 自动探测）、

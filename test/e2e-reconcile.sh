@@ -224,6 +224,22 @@ run_agent "$WS/t11b.log"
 assert_same_content "$SANDBOX/mods-server/create-2.0.jar" "$SANDBOX/mods/create-2.0.jar" "被改坏的文件已修复"
 
 # ---------------------------------------------------- T12 结构检查
+say "T13 首次启动时 mods/ 里已有与服务器一致的文件：沿用本地、不重下、不归档"
+GAME2="$WS/game2"
+mkdir -p "$GAME2/mods"
+cp "$SRC"/*.jar "$GAME2/mods/"                       # 玩家自己已经装好了整套服务器模组
+make_mod "$GAME2/mods/mymod-player-1.0.jar" mymod "player-payload"
+SERVER_COUNT="$(ls -1 "$SRC"/*.jar | wc -l | tr -d ' ')"
+FIRST_JAR="$(ls -1 "$SRC"/*.jar | head -1)"
+MT_BEFORE="$(file_mtime "$GAME2/mods/$(basename "$FIRST_JAR")")"
+( cd "$GAME2" && "$JAVA" -jar "$AGENT_JAR" --game-dir "$GAME2" --manifest-url "$MANIFEST_URL" ) >"$WS/t13.log" 2>&1
+assert_log "$WS/t13.log" "沿用" "沿用了本地已有的一致文件"
+assert_log "$WS/t13.log" "完成: 校验 ${SERVER_COUNT}，下载 0，移除 0，归档 0，补齐 0" "零下载、零归档完成首次对账"
+assert_eq "${SERVER_COUNT}" "$(count_jars "$GAME2/mods-server")" "账本被完整填充"
+assert_eq "${MT_BEFORE}" "$(file_mtime "$GAME2/mods/$(basename "$FIRST_JAR")")" "内容一致的文件未被重写"
+assert_file_absent "$GAME2/modsync/archive" "没有把内容一致的文件误当冲突归档"
+assert_file_exists "$GAME2/mods/mymod-player-1.0.jar" "玩家自己的模组未被触碰"
+
 say "T12 304 路径与运行期结构"
 assert_log "$WS/t6b.log" "304" "清单未变时走到了 304 分支（真 ETag/If-None-Match）"
 
